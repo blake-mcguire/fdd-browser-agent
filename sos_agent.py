@@ -6,6 +6,7 @@ Uses open-source browser-use with a local Chromium browser and GPT-4o for reason
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 from typing import Optional
@@ -19,7 +20,10 @@ from config import (
     SOS_BROWSER_MODEL, BROWSER_HEADLESS, GLOBAL_BROWSER_CAP,
 )
 from models import Officer, SOSResult, PersonEntry
-from llm import classify_name
+from llm import classify_name, GeminiOverloadedError
+
+# Fallback model for browser-use agent when primary is 503-ing
+SOS_FALLBACK_MODEL = os.getenv("SOS_FALLBACK_MODEL", "gemini-2.5-flash-lite")
 from sos_portal_instructions import PORTAL_INSTRUCTIONS
 
 logger = logging.getLogger("fdd-agent")
@@ -56,15 +60,22 @@ class SOSExtraction(BaseModel):
 
 # ── LLM + Browser setup ─────────────────────────────────────
 
-def _build_llm(api_key: str) -> ChatGoogle:
+def _build_llm(api_key: str, model: str = "") -> ChatGoogle:
     return ChatGoogle(
-        model=SOS_BROWSER_MODEL,
+        model=model or SOS_BROWSER_MODEL,
         api_key=api_key,
         temperature=0,
         thinking_budget=0,     # disable thinking tokens for speed/cost
         max_retries=5,         # built-in 429 retry with backoff
         max_output_tokens=8096,
     )
+
+
+def _build_fallback_llm(api_key: str) -> ChatGoogle | None:
+    """Build a fallback LLM for browser-use to switch to on 503s."""
+    if SOS_FALLBACK_MODEL and SOS_FALLBACK_MODEL != SOS_BROWSER_MODEL:
+        return _build_llm(api_key, model=SOS_FALLBACK_MODEL)
+    return None
 
 
 def _new_browser() -> Browser:
@@ -196,9 +207,10 @@ async def _run_single_sos(
 
     task = _build_sos_task(entity_name, state_code, name_type, first_name, last_name)
     llm = _build_llm(api_key)
+    fallback = _build_fallback_llm(api_key)
 
     try:
-        agent = Agent(
+        agent_kwargs = dict(
             task=task,
             llm=llm,
             browser=browser,
@@ -206,6 +218,9 @@ async def _run_single_sos(
             use_vision=True,
             max_failures=5,
         )
+        if fallback:
+            agent_kwargs["fallback_llm"] = fallback
+        agent = Agent(**agent_kwargs)
 
         history = await asyncio.wait_for(
             agent.run(max_steps=SOS_MAX_STEPS),
@@ -304,6 +319,9 @@ async def sos_lookup_batch(
     )
 
     all_results = []
+    consecutive_503_failures = 0
+    MAX_CONSECUTIVE_503 = 3  # abort batch after this many consecutive 503/overload failures
+
     for batch_idx, sub_batch in enumerate(sub_batches):
         logger.info(
             f"SOS sub-batch {batch_idx + 1}/{len(sub_batches)} for {primary}: "
@@ -350,6 +368,28 @@ async def sos_lookup_batch(
 
             if on_result:
                 await on_result(entity_dict, sos_result)
+
+            # Detect consecutive 503/overload failures — abort batch if Gemini is down
+            err_text = (sos_result.error or "").lower()
+            is_503_fail = (
+                sos_result.confidence == "FAILED"
+                and ("503" in err_text or "unavailable" in err_text
+                     or "consecutive failures" in err_text
+                     or "high demand" in err_text)
+            )
+            if is_503_fail:
+                consecutive_503_failures += 1
+                if consecutive_503_failures >= MAX_CONSECUTIVE_503:
+                    logger.error(
+                        f"SOS batch {primary}: {consecutive_503_failures} consecutive "
+                        f"503/overload failures — aborting. Gemini API appears down."
+                    )
+                    raise GeminiOverloadedError(
+                        f"Gemini API is overloaded — {consecutive_503_failures} consecutive "
+                        f"SOS lookups failed with 503 errors. Please try again later."
+                    )
+            else:
+                consecutive_503_failures = 0
 
             # Rate-limit delay between entities to avoid LLM API burst limits
             if SOS_INTER_ENTITY_DELAY > 0 and i < len(sub_batch) - 1:
