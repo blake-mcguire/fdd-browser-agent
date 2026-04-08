@@ -1,0 +1,19 @@
+version: "3.9"
+
+services:
+  fdd-agent:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - fdd-jobs:/app/jobs        # persists completed job XLSX files
+    environment:
+      - DISPLAY=:99
+    # Allow the non-headless browser to access shared memory
+    shm_size: "2gb"
+    restart: unless-stopped
+
+volumes:
+  fdd-jobs:

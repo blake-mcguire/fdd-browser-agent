@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FDD Lead Enrichment Agent</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:        #eef0f4;
+    --surface:   #ffffff;
+    --border:    #dde2ea;
+    --blue:      #4BBFCF;
+    --blue-dark: #1E6FA8;
+    --green:     #6AAD3D;
+    --orange:    #F7941E;
+    --purple:    #7C5CBF;
+    --gold:      #F5C518;
+    --gray-hcm:  #6D6E71;
+    --text:      #1c2333;
+    --muted:     #6D6E71;
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 32px;
+    background: var(--blue-dark);
+    position: sticky; top: 0; z-index: 10;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.15);
+  }
+  .header-left h1 { font-size: 1.1rem; font-weight: 700; color: #fff; }
+  .header-left p { font-size: 0.76rem; color: rgba(255,255,255,0.6); margin-top: 2px; }
+  .logo-wrap { background: #fff; border-radius: 8px; padding: 6px 14px; display: flex; align-items: center; }
+  header img.logo { height: 36px; object-fit: contain; display: block; }
+
+  main { flex: 1; padding: 28px 32px; max-width: 900px; width: 100%; margin: 0 auto; }
+
+  .upload-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 24px; margin-bottom: 28px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+  }
+  .upload-card h2 { font-size: 0.82rem; font-weight: 700; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 14px; }
+
+  #drop-zone {
+    border: 2px dashed var(--border); border-radius: 8px;
+    padding: 36px 24px; text-align: center; cursor: pointer;
+    transition: border-color 0.2s, background 0.2s; background: var(--bg);
+  }
+  #drop-zone.over { border-color: var(--blue-dark); background: rgba(30,111,168,0.05); }
+  #drop-zone .icon { font-size: 2rem; margin-bottom: 10px; }
+  #drop-zone p { color: var(--muted); font-size: 0.88rem; }
+  #drop-zone strong { color: var(--blue-dark); }
+  #file-input { display: none; }
+  #file-name { font-size: 0.82rem; color: var(--blue-dark); margin-top: 10px;
+    font-weight: 500; min-height: 1.2em; }
+
+  .run-btn {
+    margin-top: 16px; width: 100%; padding: 11px; background: var(--blue-dark);
+    color: #fff; border: none; border-radius: 8px; font-size: 0.95rem;
+    font-weight: 600; cursor: pointer; transition: background 0.2s, opacity 0.2s;
+  }
+  .run-btn:hover:not(:disabled) { background: #175a8a; }
+  .run-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+  .run-btn.parsing { background: #175a8a; opacity: 1; cursor: not-allowed; }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .spinner {
+    display: inline-block; width: 14px; height: 14px;
+    border: 2px solid rgba(255,255,255,0.35); border-top-color: #fff;
+    border-radius: 50%; animation: spin 0.7s linear infinite;
+    vertical-align: middle; margin-right: 8px;
+  }
+
+  .jobs-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+  .jobs-header h2 { font-size: 0.82rem; font-weight: 700; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.08em; }
+  .clear-btn {
+    font-size: 0.76rem; color: var(--muted); background: var(--surface);
+    border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px;
+    cursor: pointer; transition: color 0.2s, border-color 0.2s;
+  }
+  .clear-btn:hover { color: var(--text); border-color: var(--gray-hcm); }
+
+  #jobs-list { display: flex; flex-direction: column; gap: 12px; }
+
+  .empty-state {
+    text-align: center; padding: 48px 0; color: var(--muted); font-size: 0.88rem;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+  }
+  .empty-state .empty-icon { font-size: 2rem; margin-bottom: 10px; }
+
+  .job-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 18px 20px; box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+  }
+  .job-card.running { border-left: 4px solid var(--blue-dark); }
+  .job-card.done    { border-left: 4px solid var(--green); }
+  .job-card.failed  { border-left: 4px solid #e53e3e; }
+  .job-card.queued  { border-left: 4px solid var(--orange); }
+  .job-card.lost    { border-left: 4px solid var(--gray-hcm); opacity: 0.75; }
+
+  .dismiss-btn {
+    background: none; border: none; color: var(--muted); font-size: 1rem;
+    cursor: pointer; padding: 0 2px; line-height: 1; flex-shrink: 0;
+  }
+  .dismiss-btn:hover { color: #c53030; }
+
+  .job-top {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 12px; gap: 12px;
+  }
+  .job-filename {
+    font-weight: 600; font-size: 0.92rem; color: var(--text);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1;
+  }
+  .job-meta { font-size: 0.76rem; color: var(--muted); white-space: nowrap; }
+
+  .badge {
+    display: inline-block; padding: 3px 10px; border-radius: 999px;
+    font-size: 0.68rem; font-weight: 700; letter-spacing: 0.07em;
+    text-transform: uppercase; white-space: nowrap;
+  }
+  .badge.running { background: rgba(30,111,168,0.1);  color: var(--blue-dark); }
+  .badge.done    { background: rgba(106,173,61,0.12); color: #3d8a1a; }
+  .badge.failed  { background: rgba(229,62,62,0.1);   color: #c53030; }
+  .badge.queued  { background: rgba(247,148,30,0.12); color: #c47000; }
+  .badge.lost    { background: rgba(109,110,113,0.12); color: #4a4a4d; }
+
+  .progress-wrap {
+    background: var(--bg); border-radius: 999px; height: 6px;
+    overflow: hidden; margin-bottom: 6px;
+  }
+  .progress-bar {
+    height: 100%; border-radius: 999px;
+    background: linear-gradient(90deg, var(--blue-dark), var(--blue));
+    transition: width 0.5s ease; width: 0%;
+  }
+  .job-card.done .progress-bar {
+    background: linear-gradient(90deg, #4a9e2a, var(--green));
+    width: 100% !important;
+  }
+
+  /* Phase counters row */
+  .phase-counters {
+    display: flex; gap: 16px; margin-bottom: 10px; flex-wrap: wrap;
+  }
+  .phase-counter {
+    font-size: 0.74rem; color: var(--muted); display: flex; align-items: center; gap: 4px;
+  }
+  .phase-counter .dot {
+    width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+  }
+  .phase-counter .dot.sos    { background: var(--blue-dark); }
+  .phase-counter .dot.company { background: var(--orange); }
+  .phase-counter .dot.person  { background: var(--purple); }
+  .phase-counter strong { color: var(--text); }
+
+  .eta-text {
+    font-size: 0.74rem; color: var(--muted); font-style: italic; margin-bottom: 10px;
+  }
+
+  /* Activity log */
+  .activity-log {
+    margin-bottom: 12px; border: 1px solid var(--border); border-radius: 6px; overflow: hidden;
+  }
+  .activity-log summary {
+    list-style: none; display: flex; align-items: center; justify-content: space-between;
+    padding: 7px 12px; font-size: 0.76rem; font-weight: 600; color: var(--muted);
+    background: var(--bg); cursor: pointer; user-select: none; gap: 8px;
+  }
+  .activity-log summary::-webkit-details-marker { display: none; }
+  .activity-log summary .chevron { font-size: 0.6rem; transition: transform 0.2s; margin-left: auto; }
+  .activity-log[open] summary .chevron { transform: rotate(180deg); }
+  .log-count {
+    background: rgba(30,111,168,0.1); color: var(--blue-dark);
+    border-radius: 999px; padding: 1px 7px; font-size: 0.68rem; font-weight: 700;
+  }
+  .log-entries {
+    max-height: 220px; overflow-y: auto; padding: 6px 0; background: var(--surface);
+  }
+  .log-entry {
+    padding: 4px 12px; font-size: 0.76rem; color: var(--text);
+    border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px;
+  }
+  .log-entry:last-child { border-bottom: none; }
+  .log-entry .log-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+  .log-entry.type-sos .log-dot     { background: var(--blue-dark); }
+  .log-entry.type-company .log-dot { background: var(--orange); }
+  .log-entry.type-person .log-dot  { background: var(--purple); }
+  .log-entry.type-done .log-dot    { background: var(--green); }
+
+  .job-bottom {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  }
+  .job-stats { font-size: 0.76rem; color: var(--muted); }
+  .job-stats span { color: var(--blue-dark); font-weight: 700; }
+
+  .dl-btn {
+    padding: 6px 14px; background: var(--green); color: #fff; border: none;
+    border-radius: 6px; font-size: 0.8rem; font-weight: 600; cursor: pointer;
+    transition: background 0.2s; white-space: nowrap;
+  }
+  .dl-btn:hover { background: #5a9a33; }
+  .err-text {
+    font-size: 0.78rem; color: #c53030; flex: 1;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+
+  footer {
+    text-align: center; padding: 20px; font-size: 0.74rem; color: var(--muted);
+    border-top: 1px solid var(--border); background: var(--surface);
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="header-left">
+    <h1>FDD Lead Enrichment Agent</h1>
+    <p>SOS Lookup &rarr; Company Intel &rarr; Person Search &rarr; Lead Sheet</p>
+  </div>
+  <div class="logo-wrap">
+    <img src="/static/logo.png" alt="Alliance Human Capital Management" class="logo">
+  </div>
+</header>
+
+<main>
+  <div class="upload-card">
+    <h2>New Job</h2>
+    <div id="drop-zone" onclick="document.getElementById('file-input').click()">
+      <div class="icon">📄</div>
+      <p><strong>Click to browse</strong> or drag & drop here</p>
+      <p style="margin-top:4px">Supports: .pdf, .xlsx, .xls, .csv</p>
+    </div>
+    <input type="file" id="file-input" accept=".pdf,.xlsx,.xls,.csv">
+    <div id="file-name"></div>
+    <button class="run-btn" id="run-btn" disabled onclick="startJob()">Run Pipeline</button>
+  </div>
+
+  <div class="jobs-header">
+    <h2>Processing Queue</h2>
+    <button class="clear-btn" onclick="clearDone()">Clear Completed</button>
+  </div>
+  <div id="jobs-list">
+    <div class="empty-state" id="empty-state">
+      <div class="empty-icon">📭</div>
+      <p>No jobs yet — upload an FDD or lead list to get started</p>
+    </div>
+  </div>
+</main>
+
+<footer>Alliance Human Capital Management &mdash; FDD Lead Enrichment Agent v5</footer>
+
+<script>
+const STORAGE_KEY = 'fdd_jobs';
+let jobs = {};
+let selectedFile = null;
+const notFoundCounts = {};
+
+function saveJobs() { sessionStorage.setItem(STORAGE_KEY, JSON.stringify(jobs)); }
+function loadJobs() { try { jobs = JSON.parse(sessionStorage.getItem(STORAGE_KEY) || '{}'); } catch { jobs = {}; } }
+
+const dropZone  = document.getElementById('drop-zone');
+const fileInput = document.getElementById('file-input');
+dropZone.addEventListener('dragover',  e => { e.preventDefault(); dropZone.classList.add('over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('over'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault(); dropZone.classList.remove('over');
+  if (e.dataTransfer.files[0]) setFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', () => { if (fileInput.files[0]) setFile(fileInput.files[0]); });
+
+function setFile(f) {
+  selectedFile = f;
+  document.getElementById('file-name').textContent = `Selected: ${f.name} (${(f.size/1024).toFixed(1)} KB)`;
+  document.getElementById('run-btn').disabled = false;
+}
+
+async function startJob() {
+  if (!selectedFile) return;
+  const btn = document.getElementById('run-btn');
+  btn.disabled = true; btn.classList.add('parsing');
+  btn.innerHTML = '<span class="spinner"></span>Parsing Data…';
+  document.getElementById('file-name').textContent = '';
+
+  const fd = new FormData();
+  fd.append('file', selectedFile);
+
+  const resetBtn = () => { btn.disabled = true; btn.classList.remove('parsing'); btn.innerHTML = 'Run Pipeline'; };
+
+  let data;
+  try {
+    const resp = await fetch('/process-fdd', { method: 'POST', body: fd });
+    if (!resp.ok) { alert('Error starting job: ' + await resp.text()); resetBtn(); return; }
+    data = await resp.json();
+  } catch (e) { alert('Server unreachable: ' + e.message); resetBtn(); return; }
+
+  jobs[data.job_id] = {
+    id: data.job_id,
+    filename: selectedFile.name,
+    submittedAt: new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}),
+    status: 'running', progress: 0, step: 'Starting…',
+    sosTotal: data.entity_count || 0, sosCompleted: 0,
+    companyTotal: 0, companyCompleted: 0,
+    personTotal: 0, personCompleted: 0,
+    log: [], createdAt: Date.now() / 1000,
+    entityCount: null, peopleCount: null, error: null,
+  };
+  saveJobs(); renderJobs();
+  selectedFile = null; fileInput.value = ''; resetBtn();
+}
+
+async function pollAll() {
+  const active = Object.values(jobs).filter(j => j.status === 'running' || j.status === 'queued');
+  for (const j of active) {
+    try {
+      const resp = await fetch(`/job/${j.id}`);
+      if (resp.status === 404) {
+        notFoundCounts[j.id] = (notFoundCounts[j.id] || 0) + 1;
+        if (notFoundCounts[j.id] >= 5) {
+          j.status = 'lost'; j.error = 'Server restarted — results lost.';
+          saveJobs(); updateCard(j.id);
+        }
+        continue;
+      }
+      notFoundCounts[j.id] = 0;
+      if (!resp.ok) continue;
+      const d = await resp.json();
+      j.status = d.status;
+      j.progress = d.progress_pct || 0;
+      j.step = d.current_step || '';
+      j.sosTotal = d.sos_total ?? j.sosTotal;
+      j.sosCompleted = d.sos_completed ?? j.sosCompleted;
+      j.companyTotal = d.company_total ?? j.companyTotal;
+      j.companyCompleted = d.company_completed ?? j.companyCompleted;
+      j.personTotal = d.person_total ?? j.personTotal;
+      j.personCompleted = d.person_completed ?? j.personCompleted;
+      j.log = d.log || j.log;
+      j.entityCount = d.entity_count ?? j.entityCount;
+      j.peopleCount = d.people_count ?? j.peopleCount;
+      j.createdAt = j.createdAt || d.created_at;
+      j.error = d.error || null;
+      saveJobs(); updateCard(j.id);
+    } catch {}
+  }
+}
+
+function renderJobs() {
+  const list = document.getElementById('jobs-list');
+  const empty = document.getElementById('empty-state');
+  const all = Object.values(jobs).sort((a, b) => b.submittedAt > a.submittedAt ? 1 : -1);
+  if (all.length === 0) { list.innerHTML = ''; list.appendChild(empty); empty.style.display = 'block'; return; }
+  empty.style.display = 'none'; list.innerHTML = '';
+  all.forEach(j => list.appendChild(makeCard(j)));
+}
+
+function makeCard(j) {
+  const el = document.createElement('div');
+  el.className = `job-card ${j.status}`; el.id = `card-${j.id}`;
+  el.innerHTML = cardHTML(j); return el;
+}
+
+function simplifyStep(raw) {
+  if (!raw) return { label: '', type: 'sos' };
+  const msg = raw.replace(/^\[\d{2}:\d{2}:\d{2}\]\s*/, '');
+  if (/^SOS:/i.test(msg)) return { label: `SOS: ${msg.replace(/^SOS:\s*/i, '').replace(/\s*\([^)]*\)\s*$/, '')}`, type: 'sos' };
+  if (/^COMPANY:/i.test(msg)) return { label: `Company: ${msg.replace(/^COMPANY:\s*/i, '')}`, type: 'company' };
+  if (/^PERSON:/i.test(msg)) return { label: `Person: ${msg.replace(/^PERSON:\s*/i, '')}`, type: 'person' };
+  if (/complete|done/i.test(msg)) return { label: msg, type: 'done' };
+  return { label: msg, type: 'sos' };
+}
+
+function calcETA(j) {
+  if (j.status !== 'running') return '';
+  const pct = j.progress || 0;
+  if (pct < 3 || !j.createdAt) return 'Calculating…';
+  const elapsedMin = (Date.now() / 1000 - j.createdAt) / 60;
+  const totalMin = elapsedMin / (pct / 100);
+  const remMin = Math.max(0, totalMin - elapsedMin);
+  if (remMin < 1) return '< 1 min remaining';
+  return `~${Math.round(remMin)} min remaining`;
+}
+
+function cardHTML(j) {
+  const label = { running:'Running', done:'Done', failed:'Failed', queued:'Queued', lost:'Lost' }[j.status] || j.status;
+  const pct = j.status === 'done' ? 100 : (j.progress || 0);
+
+  // Phase counters
+  const phaseCounters = (j.status === 'running' || j.status === 'queued') ? `
+    <div class="phase-counters">
+      <div class="phase-counter"><span class="dot sos"></span> SOS: <strong>${j.sosCompleted || 0}</strong>/${j.sosTotal || 0}</div>
+      <div class="phase-counter"><span class="dot company"></span> Company: <strong>${j.companyCompleted || 0}</strong>/${j.companyTotal || 0}</div>
+      <div class="phase-counter"><span class="dot person"></span> Person: <strong>${j.personCompleted || 0}</strong>/${j.personTotal || 0}</div>
+    </div>` : '';
+
+  const eta = calcETA(j);
+  const etaHtml = (j.status === 'running') ? `<div class="eta-text">${escHtml(eta)}</div>` : '';
+
+  const logEntries = (j.log || []).map(raw => {
+    const s = simplifyStep(raw);
+    return `<div class="log-entry type-${s.type}"><span class="log-dot"></span>${escHtml(s.label)}</div>`;
+  }).join('');
+  const logCount = (j.log || []).length;
+  const activityLog = logCount > 0 ? `
+    <details class="activity-log">
+      <summary>Activity Log <span class="log-count">${logCount}</span><span class="chevron">&#9660;</span></summary>
+      <div class="log-entries">${logEntries}</div>
+    </details>` : '';
+
+  let bottom = '';
+  if (j.status === 'done') {
+    const e = j.entityCount != null ? `<span>${j.entityCount}</span> entities` : '';
+    const p = j.peopleCount != null ? ` &middot; <span>${j.peopleCount}</span> people` : '';
+    bottom = `<div class="job-stats">${e}${p}</div>
+              <button class="dl-btn" onclick="dl('${j.id}')">&#8595; Download XLSX</button>`;
+  } else if (j.status === 'failed') {
+    bottom = `<div class="err-text">${escHtml(j.error || 'Unknown error')}</div>`;
+  } else { bottom = '<div></div>'; }
+
+  return `
+    <div class="job-top">
+      <div class="job-filename" title="${escHtml(j.filename)}">${escHtml(j.filename)}</div>
+      <div class="job-meta">${j.submittedAt}</div>
+      <span class="badge ${j.status}">${label}</span>
+      <button class="dismiss-btn" onclick="dismiss('${j.id}')" title="Dismiss">&#x2715;</button>
+    </div>
+    <div class="progress-wrap"><div class="progress-bar" style="width:${pct}%"></div></div>
+    ${phaseCounters}${etaHtml}${activityLog}
+    <div class="job-bottom">${bottom}</div>`;
+}
+
+function updateCard(id) {
+  const j = jobs[id]; const el = document.getElementById(`card-${id}`);
+  if (!el) { renderJobs(); return; }
+  el.className = `job-card ${j.status}`; el.innerHTML = cardHTML(j);
+}
+
+function dl(id) { window.location.href = `/job/${id}/download`; }
+function dismiss(id) { delete jobs[id]; delete notFoundCounts[id]; saveJobs(); renderJobs(); }
+function clearDone() {
+  Object.keys(jobs).forEach(id => { if (jobs[id].status === 'done' || jobs[id].status === 'failed') delete jobs[id]; });
+  saveJobs(); renderJobs();
+}
+function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+async function checkBootId() {
+  try {
+    const resp = await fetch('/health');
+    if (!resp.ok) return;
+    const { boot_id } = await resp.json();
+    const stored = sessionStorage.getItem('fdd_boot_id');
+    if (stored && stored !== boot_id) { jobs = {}; saveJobs(); }
+    sessionStorage.setItem('fdd_boot_id', boot_id);
+  } catch {}
+}
+
+(async () => { loadJobs(); await checkBootId(); renderJobs(); pollAll(); setInterval(pollAll, 3000); })();
+</script>
+</body>
+</html>
