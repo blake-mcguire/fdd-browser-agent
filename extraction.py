@@ -13,7 +13,7 @@ from collections import Counter, defaultdict
 import pdfplumber
 import openpyxl
 
-from llm import call_extraction, call_structure
+from llm import call_extraction, call_structure, GeminiOverloadedError, GeminiRateLimitError, APIKeyDeadError
 
 logger = logging.getLogger("fdd-agent")
 
@@ -179,6 +179,10 @@ async def extract_entities_from_pdf(pdf_bytes: bytes, api_key: str) -> list[dict
             chunk_entities = _parse_entity_list(raw)
             logger.info(f"Chunk {idx + 1}: found {len(chunk_entities)} entities")
             all_entities.extend(chunk_entities)
+        except (GeminiOverloadedError, GeminiRateLimitError, APIKeyDeadError) as e:
+            # Gemini is down — abort immediately, don't waste time on remaining chunks
+            logger.error(f"Entity extraction aborted at chunk {idx + 1}/{len(chunks)}: {e}")
+            raise
         except Exception as e:
             logger.error(f"Entity extraction chunk {idx + 1} failed: {e}")
 

@@ -11,11 +11,10 @@ import time
 from typing import Optional
 
 from pydantic import BaseModel
-from browser_use import Agent, Browser
-from browser_use.llm.openai.chat import ChatOpenAI
+from browser_use import Agent, Browser, ChatGoogle
 
 from config import (
-    OPENAI_API_KEY, SOS_REGISTRY, SOS_TIMEOUT, SOS_MAX_STEPS,
+    GOOGLE_API_KEY, SOS_REGISTRY, SOS_TIMEOUT, SOS_MAX_STEPS,
     SOS_INTER_ENTITY_DELAY, STATUTORY_AGENTS, BIZ_SUFFIXES, is_statutory,
     SOS_BROWSER_MODEL, BROWSER_HEADLESS, GLOBAL_BROWSER_CAP,
 )
@@ -57,11 +56,14 @@ class SOSExtraction(BaseModel):
 
 # ── LLM + Browser setup ─────────────────────────────────────
 
-def _build_llm(api_key: str) -> ChatOpenAI:
-    return ChatOpenAI(
+def _build_llm(api_key: str) -> ChatGoogle:
+    return ChatGoogle(
         model=SOS_BROWSER_MODEL,
         api_key=api_key,
         temperature=0,
+        thinking_budget=0,     # disable thinking tokens for speed/cost
+        max_retries=5,         # built-in 429 retry with backoff
+        max_output_tokens=8096,
     )
 
 
@@ -240,7 +242,7 @@ async def sos_lookup(entity_name: str, state: str, api_key: str) -> SOSResult:
             confidence="FAILED", error=f"Unknown state: {primary}",
         )
 
-    key = api_key or OPENAI_API_KEY
+    key = api_key or GOOGLE_API_KEY
     browser = _new_browser()
 
     try:
@@ -266,15 +268,17 @@ async def sos_lookup_batch(
     state: str,
     api_key: str,
     on_result=None,
+    on_start=None,
 ) -> list[SOSResult]:
     """
     Batch SOS lookup — splits large batches into sub-batches of MAX_BATCH_SIZE,
     each with its own local browser instance. If one browser crashes, only that
     sub-batch is affected.
     on_result: optional async callback(entity_dict, sos_result) called after each entity.
+    on_start: optional async callback(entity_dict) called before each entity starts.
     """
     primary = state.strip().upper()
-    key = api_key or OPENAI_API_KEY
+    key = api_key or GOOGLE_API_KEY
 
     if primary not in SOS_REGISTRY or not key:
         results = []
@@ -312,6 +316,9 @@ async def sos_lookup_batch(
                 f"SOS batch {primary}: entity {batch_idx * MAX_BATCH_SIZE + i + 1}"
                 f"/{len(entities)} — {entity_name}"
             )
+
+            if on_start:
+                await on_start(entity_dict)
 
             # Fresh browser per entity — browser-use agents don't reliably
             # reuse a browser left on a previous entity's SOS detail page.

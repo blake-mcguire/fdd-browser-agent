@@ -1,6 +1,6 @@
 """
-OpenAI GPT-4o mini API helpers — direct API calls for extraction and structuring.
-Cheap and fast, on par with Gemini Flash 2.5 for tabular parsing tasks.
+Google Gemini API helpers — direct SDK calls for PDF extraction and JSON structuring.
+Gemini 2.5 Flash: fast, cheap, excellent at tabular parsing.
 Includes a global API key health tracker to fail-fast when the key is dead.
 """
 
@@ -10,10 +10,14 @@ import logging
 import re
 import time
 
-import httpx
+from google import genai
+from google.genai import types
 
-from config import OPENAI_API_KEY, OPENAI_MODEL
-from rate_limiter import get_rate_limiter
+from config import GOOGLE_API_KEY, GEMINI_MODEL
+
+# Fallback model if primary is overloaded (503).
+# gemini-2.0-flash is EOL — use 2.5-flash-lite (lighter variant, less demand).
+GEMINI_FALLBACK_MODEL = "gemini-2.5-flash-lite"
 
 logger = logging.getLogger("fdd-agent")
 
@@ -24,6 +28,16 @@ _api_key_status: dict[str, dict] = {}
 
 class APIKeyDeadError(Exception):
     """Raised when the API key is known to be invalid/suspended."""
+    pass
+
+
+class GeminiOverloadedError(Exception):
+    """Raised when Gemini API is persistently overloaded (503) across all models."""
+    pass
+
+
+class GeminiRateLimitError(Exception):
+    """Raised when Gemini API rate limits (429) are exhausted after all retries."""
     pass
 
 
@@ -51,20 +65,20 @@ def check_key_alive(api_key: str):
         raise APIKeyDeadError(f"API key is suspended: {reason}")
 
 
-def _check_fatal_error(status_code: int, body: str, api_key: str) -> bool:
-    """Check for fatal (non-retryable) errors. Returns True if fatal."""
-    if status_code == 401:
-        mark_key_dead(api_key, f"HTTP 401 Unauthorized: {body[:200]}")
-        return True
-    if status_code == 403:
-        mark_key_dead(api_key, f"HTTP 403 Forbidden: {body[:200]}")
-        return True
-    return False
+# ── Gemini Client Cache ─────────────────────────────────────
+_clients: dict[str, genai.Client] = {}
 
 
-# ── OpenAI Chat Completions API ──────────────────────────────
+def _get_client(api_key: str) -> genai.Client:
+    """Get or create a Gemini client for the given API key."""
+    if api_key not in _clients:
+        _clients[api_key] = genai.Client(api_key=api_key)
+    return _clients[api_key]
 
-async def call_openai(
+
+# ── Gemini Chat Completions ─────────────────────────────────
+
+async def call_gemini(
     system: str,
     user: str,
     api_key: str,
@@ -72,67 +86,136 @@ async def call_openai(
     max_tokens: int = 8192,
 ) -> str:
     """
-    Call the OpenAI Chat Completions API directly via httpx.
-    Defaults to GPT-4o mini for fast, cheap parsing.
+    Call the Gemini API via the google-genai SDK.
+    Defaults to Gemini 2.5 Flash for fast, cheap parsing.
     """
     check_key_alive(api_key)
-    model = model or OPENAI_MODEL
+    active_model = model or GEMINI_MODEL
+    original_model = active_model
 
-    url = "https://api.openai.com/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    body = {
-        "model": model,
-        "max_tokens": max_tokens,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-    }
-
-    max_retries = 5
-    limiter = get_rate_limiter()
+    max_retries = 7
+    consecutive_503 = 0
+    fell_back = False
+    last_error = ""
+    total_503 = 0
+    total_429 = 0
 
     for attempt in range(max_retries):
         check_key_alive(api_key)
-        await limiter.acquire()
 
-        async with httpx.AsyncClient(timeout=300) as client:
-            resp = await client.post(url, headers=headers, json=body)
+        try:
+            client = _get_client(api_key)
 
-            # Update rate limiter from OpenAI response headers
-            limiter.update_from_headers(dict(resp.headers))
+            # Run the synchronous SDK call in a thread to avoid blocking asyncio
+            response = await asyncio.to_thread(
+                client.models.generate_content,
+                model=active_model,
+                contents=user,
+                config=types.GenerateContentConfig(
+                    system_instruction=system,
+                    max_output_tokens=max_tokens,
+                    temperature=0,
+                ),
+            )
 
-            if _check_fatal_error(resp.status_code, resp.text, api_key):
-                raise APIKeyDeadError(f"API key error: {resp.text[:200]}")
+            if response.text:
+                return response.text
+            return ""
 
-            if resp.status_code == 429 and attempt < max_retries - 1:
-                retry_after = resp.headers.get("retry-after")
-                wait = int(retry_after) if retry_after else min(2 ** attempt * 2 + 1, 60)
+        except (APIKeyDeadError, GeminiOverloadedError, GeminiRateLimitError):
+            raise  # don't wrap our own exceptions
+
+        except Exception as e:
+            err_str = str(e)
+            last_error = err_str
+
+            # Check for fatal errors
+            if "401" in err_str or "UNAUTHENTICATED" in err_str:
+                mark_key_dead(api_key, f"Authentication failed: {err_str[:200]}")
+                raise APIKeyDeadError(f"Gemini API key error: {err_str[:200]}")
+
+            if "403" in err_str or "PERMISSION_DENIED" in err_str:
+                mark_key_dead(api_key, f"Permission denied: {err_str[:200]}")
+                raise APIKeyDeadError(f"Gemini API key error: {err_str[:200]}")
+
+            # 404 — model doesn't exist. If on fallback already, fatal.
+            # If on primary, switch to fallback immediately.
+            if "404" in err_str or "NOT_FOUND" in err_str:
+                if active_model == GEMINI_FALLBACK_MODEL:
+                    raise RuntimeError(
+                        f"Gemini model '{active_model}' not found (404). "
+                        f"Check GEMINI_MODEL in your .env — the model may have been deprecated."
+                    )
                 logger.warning(
-                    f"OpenAI 429 — retrying in {wait}s (attempt {attempt + 1}/{max_retries})"
+                    f"Gemini model '{active_model}' not found (404) — "
+                    f"switching to {GEMINI_FALLBACK_MODEL}"
+                )
+                active_model = GEMINI_FALLBACK_MODEL
+                fell_back = True
+                continue
+
+            # Classify the error
+            is_503 = "503" in err_str or "UNAVAILABLE" in err_str
+            is_429 = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str
+            is_retryable = is_503 or is_429 or "500" in err_str
+
+            if is_503:
+                total_503 += 1
+                consecutive_503 += 1
+                if consecutive_503 >= 3 and active_model != GEMINI_FALLBACK_MODEL:
+                    logger.warning(
+                        f"Gemini {active_model} overloaded ({consecutive_503}x 503) "
+                        f"— falling back to {GEMINI_FALLBACK_MODEL}"
+                    )
+                    active_model = GEMINI_FALLBACK_MODEL
+                    fell_back = True
+                    consecutive_503 = 0
+            else:
+                consecutive_503 = 0
+
+            if is_429:
+                total_429 += 1
+
+            if is_retryable and attempt < max_retries - 1:
+                # 503 gets longer waits (server overload needs more cooldown)
+                if is_503:
+                    wait = min(2 ** attempt * 5 + 5, 90)
+                else:
+                    wait = min(2 ** attempt * 2 + 1, 60)
+                logger.warning(
+                    f"Gemini API error ({active_model}) — retrying in {wait}s "
+                    f"(attempt {attempt + 1}/{max_retries}): {err_str[:120]}"
                 )
                 await asyncio.sleep(wait)
                 continue
 
-            if resp.status_code == 503 and attempt < max_retries - 1:
-                wait = min(2 ** attempt * 3 + 2, 60)
-                logger.warning(f"OpenAI 503 overloaded — retrying in {wait}s")
-                await asyncio.sleep(wait)
-                continue
+            # Retries exhausted — raise a typed exception
+            if attempt >= max_retries - 1:
+                if total_503 > 0:
+                    models_tried = original_model
+                    if fell_back:
+                        models_tried += f" and {GEMINI_FALLBACK_MODEL}"
+                    raise GeminiOverloadedError(
+                        f"Gemini API is experiencing high demand. "
+                        f"Tried {models_tried} — got {total_503} overload errors "
+                        f"across {max_retries} attempts. Please try again in a few minutes."
+                    )
+                if total_429 > 0:
+                    raise GeminiRateLimitError(
+                        f"Gemini API rate limit exceeded. "
+                        f"Got {total_429} rate-limit errors across {max_retries} attempts. "
+                        f"Your account may need a higher tier, or try again after a brief wait."
+                    )
+                raise RuntimeError(
+                    f"Gemini API failed after {max_retries} retries: {err_str[:300]}"
+                )
 
-            if resp.status_code != 200:
-                raise RuntimeError(f"OpenAI API {resp.status_code}: {resp.text[:500]}")
+            # Unknown error — retry with backoff
+            wait = min(2 ** attempt * 2 + 1, 60)
+            logger.warning(f"Gemini API unexpected error — retrying in {wait}s: {err_str[:100]}")
+            await asyncio.sleep(wait)
 
-            data = resp.json()
-            choices = data.get("choices", [])
-            if choices:
-                return choices[0].get("message", {}).get("content", "")
-            return ""
-
-    raise RuntimeError("OpenAI API: max retries exceeded")
+    raise RuntimeError("Gemini API: max retries exceeded")
 
 
 async def call_extraction(
@@ -141,10 +224,10 @@ async def call_extraction(
     api_key: str,
     max_tokens: int = 16384,
 ) -> str:
-    """Call GPT-4o mini for PDF extraction — fast and cheap, handles tabular parsing fine."""
-    return await call_openai(
+    """Call Gemini for PDF extraction — fast and cheap, handles tabular parsing fine."""
+    return await call_gemini(
         system=system, user=user, api_key=api_key,
-        model=OPENAI_MODEL, max_tokens=max_tokens,
+        model=GEMINI_MODEL, max_tokens=max_tokens,
     )
 
 
@@ -154,10 +237,10 @@ async def call_structure(
     api_key: str,
     max_tokens: int = 4096,
 ) -> str:
-    """Call GPT-4o mini for lightweight structuring tasks (JSON parsing, data formatting)."""
-    return await call_openai(
+    """Call Gemini for lightweight structuring tasks (JSON parsing, data formatting)."""
+    return await call_gemini(
         system=system, user=prompt, api_key=api_key,
-        model=OPENAI_MODEL, max_tokens=max_tokens,
+        model=GEMINI_MODEL, max_tokens=max_tokens,
     )
 
 
@@ -186,10 +269,10 @@ def classify_name(name: str, api_key: str = "") -> tuple[str, str, str]:
     """
     from config import BIZ_SUFFIXES
 
-    # Strip parenthetical qualifiers: "Ekstrom, Dennis (DTAZ, LLC)" → "Ekstrom, Dennis"
+    # Strip parenthetical qualifiers: "Ekstrom, Dennis (DTAZ, LLC)" -> "Ekstrom, Dennis"
     cleaned = re.sub(r'\s*\(.*?\)', '', name).strip()
 
-    # Check for business suffixes → definitely ENTITY
+    # Check for business suffixes -> definitely ENTITY
     tokens = cleaned.upper().replace(",", " ").split()
     for tok in tokens:
         if tok.rstrip(".") in {s.rstrip(".") for s in BIZ_SUFFIXES}:
@@ -214,7 +297,7 @@ def classify_name(name: str, api_key: str = "") -> tuple[str, str, str]:
             first_part = parts[1]
             return "PERSON", first_part, last_part
 
-    # Simple 2-4 word name → likely a person
+    # Simple 2-4 word name -> likely a person
     words = cleaned.split()
     if 2 <= len(words) <= 4 and all(
         w[0].isupper() and (w.rstrip(".").isalpha() or len(w) <= 3)

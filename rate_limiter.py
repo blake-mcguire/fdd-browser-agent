@@ -1,6 +1,7 @@
 """
-OpenAI API rate limiter — adaptive token-bucket for direct LLM calls only.
-Browser Use Cloud handles its own rate limiting for browser agents.
+Gemini API rate limiter — simple token-bucket for direct LLM extraction calls.
+Browser-use ChatGoogle handles its own retries (max_retries=5).
+Browser Use Cloud handles its own rate limiting for company/person agents.
 """
 
 import asyncio
@@ -10,20 +11,21 @@ import time
 
 logger = logging.getLogger("fdd-agent")
 
-OPENAI_RPM_LIMIT = int(os.getenv("OPENAI_RPM_LIMIT", "500"))
+# Gemini Tier 1: 300 RPM for Flash. We default to 200 to leave headroom
+# for concurrent browser-use ChatGoogle calls.
+GEMINI_RPM_LIMIT = int(os.getenv("GEMINI_RPM_LIMIT", "200"))
 
 
-class AdaptiveRateLimiter:
-    """Token-bucket rate limiter that adapts from OpenAI response headers."""
+class RateLimiter:
+    """Simple token-bucket rate limiter for Gemini extraction calls."""
 
-    def __init__(self, initial_rpm: int):
-        self.rate = initial_rpm
-        self.max_tokens = float(initial_rpm)
-        self.tokens = float(initial_rpm)
+    def __init__(self, rpm: int):
+        self.rate = rpm
+        self.max_tokens = float(rpm)
+        self.tokens = float(rpm)
         self.last_refill = time.monotonic()
         self._lock = asyncio.Lock()
-        self._learned_limit: int | None = None
-        logger.info(f"Rate limiter initialized: {initial_rpm} RPM (adaptive)")
+        logger.info(f"Rate limiter initialized: {rpm} RPM")
 
     async def acquire(self):
         while True:
@@ -38,30 +40,12 @@ class AdaptiveRateLimiter:
             wait = 60.0 / self.rate
             await asyncio.sleep(wait)
 
-    def update_from_headers(self, headers: dict):
-        """Adapt rate from OpenAI response headers."""
-        try:
-            # OpenAI uses: x-ratelimit-limit-requests, x-ratelimit-remaining-requests
-            limit = int(headers.get("x-ratelimit-limit-requests", 0))
-            remaining = int(headers.get("x-ratelimit-remaining-requests", -1))
-            if limit > 0 and (self._learned_limit is None or limit != self._learned_limit):
-                self._learned_limit = limit
-                new_rate = int(limit * 0.8)
-                if new_rate != self.rate:
-                    logger.info(f"Rate limiter adapted: {self.rate} → {new_rate} RPM (API reports {limit} RPM)")
-                    self.rate = new_rate
-                    self.max_tokens = float(new_rate)
-            if 0 <= remaining < 5:
-                self.tokens = min(self.tokens, float(remaining))
-        except (ValueError, TypeError):
-            pass
+
+_limiter: RateLimiter | None = None
 
 
-_limiter: AdaptiveRateLimiter | None = None
-
-
-def get_rate_limiter() -> AdaptiveRateLimiter:
+def get_rate_limiter() -> RateLimiter:
     global _limiter
     if _limiter is None:
-        _limiter = AdaptiveRateLimiter(OPENAI_RPM_LIMIT)
+        _limiter = RateLimiter(GEMINI_RPM_LIMIT)
     return _limiter

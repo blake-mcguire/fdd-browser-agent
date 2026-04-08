@@ -7,22 +7,22 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── Browser Use Cloud ─────────────────────────────────────────
+# ── Browser Use Cloud (company + person agents) ─────────────
 BROWSER_USE_API_KEY = os.getenv("BROWSER_USE_API_KEY", "")
 BROWSER_USE_MODEL = os.getenv("BROWSER_USE_MODEL", "browser-use-2.0")
 
-# ── OpenAI (for PDF extraction + JSON structuring — no browser) ──
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+# ── Google Gemini (SOS browser agent + PDF extraction) ───────
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
-# ── SOS Browser Agent LLM (local browser-use with GPT-4o) ────
-SOS_BROWSER_MODEL = os.getenv("SOS_BROWSER_MODEL", "gpt-4o")
+# ── SOS Browser Agent LLM (local browser-use with Gemini) ───
+SOS_BROWSER_MODEL = os.getenv("SOS_BROWSER_MODEL", "gemini-2.5-flash")
 
 # ── Browser ──────────────────────────────────────────────────
-BROWSER_HEADLESS = os.getenv("BROWSER_HEADLESS", "true").lower() in ("true", "1", "yes")
+BROWSER_HEADLESS = os.getenv("BROWSER_HEADLESS", "false").lower() in ("true", "1", "yes")
 
 # ── Concurrency ───────────────────────────────────────────────
-SOS_CONCURRENCY = int(os.getenv("SOS_CONCURRENCY", "5"))
+SOS_CONCURRENCY = int(os.getenv("SOS_CONCURRENCY", "3"))
 COMPANY_CONCURRENCY = int(os.getenv("COMPANY_CONCURRENCY", "5"))
 PERSON_CONCURRENCY_MAX = int(os.getenv("PERSON_CONCURRENCY_MAX", "10"))
 GLOBAL_BROWSER_CAP = int(os.getenv("GLOBAL_BROWSER_CAP", "20"))

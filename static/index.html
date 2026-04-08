@@ -20,6 +20,7 @@
     --gray-hcm:  #6D6E71;
     --text:      #1c2333;
     --muted:     #6D6E71;
+    --red:       #e53e3e;
   }
 
   body {
@@ -110,7 +111,7 @@
   }
   .job-card.running { border-left: 4px solid var(--blue-dark); }
   .job-card.done    { border-left: 4px solid var(--green); }
-  .job-card.failed  { border-left: 4px solid #e53e3e; }
+  .job-card.failed  { border-left: 4px solid var(--red); }
   .job-card.queued  { border-left: 4px solid var(--orange); }
   .job-card.lost    { border-left: 4px solid var(--gray-hcm); opacity: 0.75; }
 
@@ -165,7 +166,7 @@
   .phase-counter .dot {
     width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
   }
-  .phase-counter .dot.sos    { background: var(--blue-dark); }
+  .phase-counter .dot.sos     { background: var(--blue-dark); }
   .phase-counter .dot.company { background: var(--orange); }
   .phase-counter .dot.person  { background: var(--purple); }
   .phase-counter strong { color: var(--text); }
@@ -174,35 +175,73 @@
     font-size: 0.74rem; color: var(--muted); font-style: italic; margin-bottom: 10px;
   }
 
-  /* Activity log */
-  .activity-log {
+  /* Step tracker */
+  .step-tracker {
     margin-bottom: 12px; border: 1px solid var(--border); border-radius: 6px; overflow: hidden;
   }
-  .activity-log summary {
+  .step-tracker summary {
     list-style: none; display: flex; align-items: center; justify-content: space-between;
     padding: 7px 12px; font-size: 0.76rem; font-weight: 600; color: var(--muted);
     background: var(--bg); cursor: pointer; user-select: none; gap: 8px;
   }
-  .activity-log summary::-webkit-details-marker { display: none; }
-  .activity-log summary .chevron { font-size: 0.6rem; transition: transform 0.2s; margin-left: auto; }
-  .activity-log[open] summary .chevron { transform: rotate(180deg); }
-  .log-count {
+  .step-tracker summary::-webkit-details-marker { display: none; }
+  .step-tracker summary .chevron { font-size: 0.6rem; transition: transform 0.2s; margin-left: auto; }
+  .step-tracker[open] summary .chevron { transform: rotate(180deg); }
+  .step-count {
     background: rgba(30,111,168,0.1); color: var(--blue-dark);
     border-radius: 999px; padding: 1px 7px; font-size: 0.68rem; font-weight: 700;
   }
-  .log-entries {
-    max-height: 220px; overflow-y: auto; padding: 6px 0; background: var(--surface);
+  .step-entries {
+    max-height: 400px; overflow-y: auto; padding: 0; background: var(--surface);
   }
-  .log-entry {
-    padding: 4px 12px; font-size: 0.76rem; color: var(--text);
-    border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px;
+
+  /* Individual step row */
+  .step-row {
+    padding: 6px 12px; font-size: 0.76rem; color: var(--text);
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 8px;
   }
-  .log-entry:last-child { border-bottom: none; }
-  .log-entry .log-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
-  .log-entry.type-sos .log-dot     { background: var(--blue-dark); }
-  .log-entry.type-company .log-dot { background: var(--orange); }
-  .log-entry.type-person .log-dot  { background: var(--purple); }
-  .log-entry.type-done .log-dot    { background: var(--green); }
+  .step-row:last-child { border-bottom: none; }
+
+  .step-icon {
+    width: 18px; height: 18px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.7rem;
+  }
+  .step-icon.processing {
+    width: 14px; height: 14px;
+    border: 2px solid var(--border); border-top-color: var(--blue-dark);
+    border-radius: 50%; animation: spin 0.7s linear infinite;
+  }
+  .step-icon.success { color: var(--green); font-size: 0.85rem; }
+  .step-icon.failed  { color: var(--red); font-size: 0.85rem; }
+
+  .step-phase {
+    font-size: 0.64rem; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.04em; padding: 1px 6px; border-radius: 3px;
+    flex-shrink: 0; white-space: nowrap;
+  }
+  .step-phase.sos     { background: rgba(30,111,168,0.1); color: var(--blue-dark); }
+  .step-phase.company { background: rgba(247,148,30,0.1); color: #c47000; }
+  .step-phase.person  { background: rgba(124,92,191,0.1); color: var(--purple); }
+
+  .step-label {
+    flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-weight: 500;
+  }
+
+  .step-status {
+    font-size: 0.72rem; flex-shrink: 0; white-space: nowrap;
+    max-width: 320px; overflow: hidden; text-overflow: ellipsis;
+  }
+  .step-status.processing { color: var(--blue-dark); font-style: italic; }
+  .step-status.success    { color: #3d8a1a; }
+  .step-status.failed     { color: #c53030; }
+
+  .step-ts {
+    font-size: 0.66rem; color: var(--muted); flex-shrink: 0; min-width: 48px;
+    text-align: right;
+  }
 
   .job-bottom {
     display: flex; align-items: center; justify-content: space-between; gap: 10px;
@@ -219,6 +258,28 @@
   .err-text {
     font-size: 0.78rem; color: #c53030; flex: 1;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+
+  /* Error banner for extraction/API failures */
+  .error-banner {
+    background: #fef2f2; border: 1px solid #fca5a5; border-left: 4px solid var(--red);
+    border-radius: 8px; padding: 14px 18px; margin-bottom: 18px;
+    display: none; position: relative;
+  }
+  .error-banner .err-title {
+    font-weight: 700; font-size: 0.88rem; color: #991b1b; margin-bottom: 4px;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .error-banner .err-body {
+    font-size: 0.82rem; color: #7f1d1d; line-height: 1.45;
+  }
+  .error-banner .err-close {
+    position: absolute; top: 10px; right: 12px; background: none; border: none;
+    color: #991b1b; font-size: 1.1rem; cursor: pointer; padding: 0 4px;
+  }
+  .error-banner .err-close:hover { color: #450a0a; }
+  .error-banner .err-hint {
+    font-size: 0.76rem; color: #991b1b; margin-top: 8px; font-style: italic;
   }
 
   footer {
@@ -240,11 +301,17 @@
 </header>
 
 <main>
+  <div class="error-banner" id="error-banner">
+    <button class="err-close" onclick="hideError()">&times;</button>
+    <div class="err-title" id="err-title"></div>
+    <div class="err-body" id="err-body"></div>
+    <div class="err-hint" id="err-hint"></div>
+  </div>
   <div class="upload-card">
     <h2>New Job</h2>
     <div id="drop-zone" onclick="document.getElementById('file-input').click()">
-      <div class="icon">📄</div>
-      <p><strong>Click to browse</strong> or drag & drop here</p>
+      <div class="icon">&#128196;</div>
+      <p><strong>Click to browse</strong> or drag &amp; drop here</p>
       <p style="margin-top:4px">Supports: .pdf, .xlsx, .xls, .csv</p>
     </div>
     <input type="file" id="file-input" accept=".pdf,.xlsx,.xls,.csv">
@@ -258,7 +325,7 @@
   </div>
   <div id="jobs-list">
     <div class="empty-state" id="empty-state">
-      <div class="empty-icon">📭</div>
+      <div class="empty-icon">&#128237;</div>
       <p>No jobs yet — upload an FDD or lead list to get started</p>
     </div>
   </div>
@@ -271,6 +338,9 @@ const STORAGE_KEY = 'fdd_jobs';
 let jobs = {};
 let selectedFile = null;
 const notFoundCounts = {};
+
+// Track which step-tracker <details> elements are open per job
+const openTrackers = {};
 
 function saveJobs() { sessionStorage.setItem(STORAGE_KEY, JSON.stringify(jobs)); }
 function loadJobs() { try { jobs = JSON.parse(sessionStorage.getItem(STORAGE_KEY) || '{}'); } catch { jobs = {}; } }
@@ -295,7 +365,7 @@ async function startJob() {
   if (!selectedFile) return;
   const btn = document.getElementById('run-btn');
   btn.disabled = true; btn.classList.add('parsing');
-  btn.innerHTML = '<span class="spinner"></span>Parsing Data…';
+  btn.innerHTML = '<span class="spinner"></span>Parsing Data\u2026';
   document.getElementById('file-name').textContent = '';
 
   const fd = new FormData();
@@ -306,21 +376,30 @@ async function startJob() {
   let data;
   try {
     const resp = await fetch('/process-fdd', { method: 'POST', body: fd });
-    if (!resp.ok) { alert('Error starting job: ' + await resp.text()); resetBtn(); return; }
+    if (!resp.ok) {
+      let errMsg;
+      try {
+        const errData = await resp.json();
+        errMsg = errData.detail || errData.message || JSON.stringify(errData);
+      } catch { errMsg = await resp.text(); }
+      showError(resp.status, errMsg);
+      resetBtn(); return;
+    }
     data = await resp.json();
-  } catch (e) { alert('Server unreachable: ' + e.message); resetBtn(); return; }
+  } catch (e) { showError(0, 'Server unreachable: ' + e.message); resetBtn(); return; }
 
   jobs[data.job_id] = {
     id: data.job_id,
     filename: selectedFile.name,
     submittedAt: new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}),
-    status: 'running', progress: 0, step: 'Starting…',
+    status: 'running', progress: 0, step: 'Starting\u2026',
     sosTotal: data.entity_count || 0, sosCompleted: 0,
     companyTotal: 0, companyCompleted: 0,
     personTotal: 0, personCompleted: 0,
-    log: [], createdAt: Date.now() / 1000,
+    steps: [], log: [], createdAt: Date.now() / 1000,
     entityCount: null, peopleCount: null, error: null,
   };
+  openTrackers[data.job_id] = true; // auto-open for new jobs
   saveJobs(); renderJobs();
   selectedFile = null; fileInput.value = ''; resetBtn();
 }
@@ -333,7 +412,7 @@ async function pollAll() {
       if (resp.status === 404) {
         notFoundCounts[j.id] = (notFoundCounts[j.id] || 0) + 1;
         if (notFoundCounts[j.id] >= 5) {
-          j.status = 'lost'; j.error = 'Server restarted — results lost.';
+          j.status = 'lost'; j.error = 'Server restarted \u2014 results lost.';
           saveJobs(); updateCard(j.id);
         }
         continue;
@@ -350,6 +429,7 @@ async function pollAll() {
       j.companyCompleted = d.company_completed ?? j.companyCompleted;
       j.personTotal = d.person_total ?? j.personTotal;
       j.personCompleted = d.person_completed ?? j.personCompleted;
+      j.steps = d.steps || j.steps;
       j.log = d.log || j.log;
       j.entityCount = d.entity_count ?? j.entityCount;
       j.peopleCount = d.people_count ?? j.peopleCount;
@@ -372,28 +452,63 @@ function renderJobs() {
 function makeCard(j) {
   const el = document.createElement('div');
   el.className = `job-card ${j.status}`; el.id = `card-${j.id}`;
-  el.innerHTML = cardHTML(j); return el;
-}
-
-function simplifyStep(raw) {
-  if (!raw) return { label: '', type: 'sos' };
-  const msg = raw.replace(/^\[\d{2}:\d{2}:\d{2}\]\s*/, '');
-  if (/^SOS:/i.test(msg)) return { label: `SOS: ${msg.replace(/^SOS:\s*/i, '').replace(/\s*\([^)]*\)\s*$/, '')}`, type: 'sos' };
-  if (/^COMPANY:/i.test(msg)) return { label: `Company: ${msg.replace(/^COMPANY:\s*/i, '')}`, type: 'company' };
-  if (/^PERSON:/i.test(msg)) return { label: `Person: ${msg.replace(/^PERSON:\s*/i, '')}`, type: 'person' };
-  if (/complete|done/i.test(msg)) return { label: msg, type: 'done' };
-  return { label: msg, type: 'sos' };
+  el.innerHTML = cardHTML(j);
+  // Restore open state for step tracker
+  if (openTrackers[j.id]) {
+    const details = el.querySelector('.step-tracker');
+    if (details) details.open = true;
+  }
+  return el;
 }
 
 function calcETA(j) {
   if (j.status !== 'running') return '';
   const pct = j.progress || 0;
-  if (pct < 3 || !j.createdAt) return 'Calculating…';
+  if (pct < 3 || !j.createdAt) return 'Calculating\u2026';
   const elapsedMin = (Date.now() / 1000 - j.createdAt) / 60;
   const totalMin = elapsedMin / (pct / 100);
   const remMin = Math.max(0, totalMin - elapsedMin);
   if (remMin < 1) return '< 1 min remaining';
   return `~${Math.round(remMin)} min remaining`;
+}
+
+function stepIcon(status) {
+  if (status === 'processing') return '<div class="step-icon processing"></div>';
+  if (status === 'success')    return '<div class="step-icon success">\u2713</div>';
+  if (status === 'failed')     return '<div class="step-icon failed">\u2717</div>';
+  return '<div class="step-icon"></div>';
+}
+
+function stepStatusText(step) {
+  if (step.status === 'processing') return 'Processing\u2026';
+  if (step.status === 'success')    return step.detail ? `Success \u2014 ${step.detail}` : 'Success';
+  if (step.status === 'failed')     return step.detail ? `Failed \u2014 ${step.detail}` : 'Failed';
+  return step.status;
+}
+
+function phaseLabel(phase) {
+  if (phase === 'sos') return 'SOS';
+  if (phase === 'company') return 'Company';
+  if (phase === 'person') return 'Person';
+  return phase;
+}
+
+function buildStepRows(steps) {
+  if (!steps || steps.length === 0) return '';
+  return steps.map(step => {
+    const icon = stepIcon(step.status);
+    const phaseBadge = `<span class="step-phase ${esc(step.phase)}">${phaseLabel(step.phase)}</span>`;
+    const label = esc(step.label);
+    const statusCls = esc(step.status);
+    const statusTxt = esc(stepStatusText(step));
+    const ts = esc(step.ts || '');
+    return `<div class="step-row">
+      ${icon}${phaseBadge}
+      <span class="step-label" title="${label}">${label}</span>
+      <span class="step-status ${statusCls}" title="${statusTxt}">${statusTxt}</span>
+      <span class="step-ts">${ts}</span>
+    </div>`;
+  }).join('');
 }
 
 function cardHTML(j) {
@@ -409,17 +524,31 @@ function cardHTML(j) {
     </div>` : '';
 
   const eta = calcETA(j);
-  const etaHtml = (j.status === 'running') ? `<div class="eta-text">${escHtml(eta)}</div>` : '';
+  const etaHtml = (j.status === 'running') ? `<div class="eta-text">${esc(eta)}</div>` : '';
 
-  const logEntries = (j.log || []).map(raw => {
-    const s = simplifyStep(raw);
-    return `<div class="log-entry type-${s.type}"><span class="log-dot"></span>${escHtml(s.label)}</div>`;
-  }).join('');
-  const logCount = (j.log || []).length;
-  const activityLog = logCount > 0 ? `
-    <details class="activity-log">
-      <summary>Activity Log <span class="log-count">${logCount}</span><span class="chevron">&#9660;</span></summary>
-      <div class="log-entries">${logEntries}</div>
+  // Step tracker (replaces old activity log)
+  const steps = j.steps || [];
+  const stepCount = steps.length;
+  const processingCount = steps.filter(s => s.status === 'processing').length;
+  const successCount = steps.filter(s => s.status === 'success').length;
+  const failedCount = steps.filter(s => s.status === 'failed').length;
+
+  let countSummary = '';
+  const parts = [];
+  if (processingCount > 0) parts.push(`${processingCount} active`);
+  if (successCount > 0) parts.push(`${successCount} done`);
+  if (failedCount > 0) parts.push(`${failedCount} failed`);
+  countSummary = parts.join(' / ');
+
+  const stepTracker = stepCount > 0 ? `
+    <details class="step-tracker" data-job-id="${j.id}">
+      <summary>
+        Pipeline Steps
+        <span class="step-count">${stepCount}</span>
+        <span style="font-size:0.68rem;color:var(--muted);font-weight:400">${esc(countSummary)}</span>
+        <span class="chevron">&#9660;</span>
+      </summary>
+      <div class="step-entries">${buildStepRows(steps)}</div>
     </details>` : '';
 
   let bottom = '';
@@ -429,34 +558,102 @@ function cardHTML(j) {
     bottom = `<div class="job-stats">${e}${p}</div>
               <button class="dl-btn" onclick="dl('${j.id}')">&#8595; Download XLSX</button>`;
   } else if (j.status === 'failed') {
-    bottom = `<div class="err-text">${escHtml(j.error || 'Unknown error')}</div>`;
+    const errMsg = j.error || 'Unknown error';
+    const isOverload = errMsg.includes('high demand') || errMsg.includes('overload');
+    const isRateLimit = errMsg.includes('rate limit') || errMsg.includes('Rate limit');
+    const isAuthErr = errMsg.includes('key') && (errMsg.includes('invalid') || errMsg.includes('suspended') || errMsg.includes('Authentication'));
+    let errIcon = '\u26a0\ufe0f';
+    if (isOverload) errIcon = '\u23f3';
+    if (isRateLimit) errIcon = '\u26a1';
+    if (isAuthErr) errIcon = '\ud83d\udd11';
+    bottom = `<div class="err-text" title="${esc(errMsg)}">${errIcon} ${esc(errMsg)}</div>`;
   } else { bottom = '<div></div>'; }
 
   return `
     <div class="job-top">
-      <div class="job-filename" title="${escHtml(j.filename)}">${escHtml(j.filename)}</div>
+      <div class="job-filename" title="${esc(j.filename)}">${esc(j.filename)}</div>
       <div class="job-meta">${j.submittedAt}</div>
       <span class="badge ${j.status}">${label}</span>
       <button class="dismiss-btn" onclick="dismiss('${j.id}')" title="Dismiss">&#x2715;</button>
     </div>
     <div class="progress-wrap"><div class="progress-bar" style="width:${pct}%"></div></div>
-    ${phaseCounters}${etaHtml}${activityLog}
+    ${phaseCounters}${etaHtml}${stepTracker}
     <div class="job-bottom">${bottom}</div>`;
 }
 
 function updateCard(id) {
-  const j = jobs[id]; const el = document.getElementById(`card-${id}`);
+  const j = jobs[id];
+  const el = document.getElementById(`card-${id}`);
   if (!el) { renderJobs(); return; }
-  el.className = `job-card ${j.status}`; el.innerHTML = cardHTML(j);
+
+  // Preserve the open/closed state of the step tracker before re-rendering
+  const details = el.querySelector('.step-tracker');
+  if (details) {
+    openTrackers[id] = details.open;
+  }
+
+  el.className = `job-card ${j.status}`;
+  el.innerHTML = cardHTML(j);
+
+  // Restore open state
+  const newDetails = el.querySelector('.step-tracker');
+  if (newDetails && openTrackers[id]) {
+    newDetails.open = true;
+  }
+
+  // Auto-scroll step entries to bottom if open
+  if (newDetails && newDetails.open) {
+    const entries = newDetails.querySelector('.step-entries');
+    if (entries) entries.scrollTop = entries.scrollHeight;
+  }
 }
 
 function dl(id) { window.location.href = `/job/${id}/download`; }
-function dismiss(id) { delete jobs[id]; delete notFoundCounts[id]; saveJobs(); renderJobs(); }
+function dismiss(id) { delete jobs[id]; delete notFoundCounts[id]; delete openTrackers[id]; saveJobs(); renderJobs(); }
 function clearDone() {
-  Object.keys(jobs).forEach(id => { if (jobs[id].status === 'done' || jobs[id].status === 'failed') delete jobs[id]; });
+  Object.keys(jobs).forEach(id => {
+    if (jobs[id].status === 'done' || jobs[id].status === 'failed') {
+      delete jobs[id]; delete openTrackers[id];
+    }
+  });
   saveJobs(); renderJobs();
 }
-function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+function showError(httpStatus, message) {
+  const banner = document.getElementById('error-banner');
+  const title = document.getElementById('err-title');
+  const body = document.getElementById('err-body');
+  const hint = document.getElementById('err-hint');
+
+  let titleText, hintText;
+  if (httpStatus === 503) {
+    titleText = 'Gemini API Overloaded';
+    hintText = 'Google\'s servers are experiencing high demand. Wait a few minutes and try again.';
+  } else if (httpStatus === 429) {
+    titleText = 'Gemini Rate Limit Exceeded';
+    hintText = 'Your API key has hit its rate limit. Wait a minute, or upgrade to a higher Gemini tier at console.cloud.google.com.';
+  } else if (httpStatus === 401) {
+    titleText = 'API Key Invalid';
+    hintText = 'Check that your GOOGLE_API_KEY is correct and billing is enabled at aistudio.google.com/apikey.';
+  } else if (httpStatus === 0) {
+    titleText = 'Connection Failed';
+    hintText = 'Make sure the server is running.';
+  } else {
+    titleText = 'Processing Error';
+    hintText = '';
+  }
+
+  title.textContent = titleText;
+  body.textContent = message;
+  hint.textContent = hintText;
+  banner.style.display = 'block';
+  banner.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function hideError() {
+  document.getElementById('error-banner').style.display = 'none';
+}
 
 async function checkBootId() {
   try {
