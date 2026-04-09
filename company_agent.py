@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import time
+from typing import Optional
 
 from pydantic import BaseModel
 from browser_use_sdk import AsyncBrowserUse
@@ -21,11 +22,11 @@ logger = logging.getLogger("fdd-agent")
 # ── Structured output schema ─────────────────────────────────
 
 class CompanyExtraction(BaseModel):
-    website: str = ""
-    recent_news_summary: str = ""
+    website: Optional[str] = ""
+    recent_news_summary: Optional[str] = ""
     key_developments: list[str] = []
     risk_signals: list[str] = []
-    notes: str = ""
+    notes: Optional[str] = ""
 
 
 async def company_enrichment(

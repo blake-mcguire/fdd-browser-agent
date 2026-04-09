@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import time
+from typing import Optional
 
 from pydantic import BaseModel
 from browser_use_sdk import AsyncBrowserUse
@@ -26,17 +27,17 @@ logger = logging.getLogger("fdd-agent")
 # ── Structured output schema ─────────────────────────────────
 
 class PersonExtraction(BaseModel):
-    linkedin_url: str = ""
-    linkedin_location: str = ""       # e.g. "Scottsdale, Arizona" — critical for enrichment
-    linkedin_headline: str = ""       # e.g. "Franchise Owner at Desert Taco LLC"
-    current_title: str = ""
-    background: str = ""              # 2-3 sentence professional summary
-    years_with_org: str = ""
-    education: str = ""
+    linkedin_url: Optional[str] = ""
+    linkedin_location: Optional[str] = ""       # e.g. "Scottsdale, Arizona" — critical for enrichment
+    linkedin_headline: Optional[str] = ""       # e.g. "Franchise Owner at Desert Taco LLC"
+    current_title: Optional[str] = ""
+    background: Optional[str] = ""              # 2-3 sentence professional summary
+    years_with_org: Optional[str] = ""
+    education: Optional[str] = ""
     # Organic discoveries — captured if found, NOT actively searched for
-    email: str = ""
-    phone: str = ""
-    personal_website: str = ""
+    email: Optional[str] = ""
+    phone: Optional[str] = ""
+    personal_website: Optional[str] = ""
 
 
 async def person_search(
