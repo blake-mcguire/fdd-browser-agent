@@ -18,6 +18,10 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 # ── SOS Browser Agent LLM (local browser-use with Gemini) ───
 SOS_BROWSER_MODEL = os.getenv("SOS_BROWSER_MODEL", "gemini-2.5-flash")
 
+# ── State Portal Credentials (some portals require login) ────
+MI_SOS_USER = os.getenv("MI_SOS_USER", "")
+MI_SOS_PASS = os.getenv("MI_SOS_PASS", "")
+
 # ── Browser ──────────────────────────────────────────────────
 BROWSER_HEADLESS = os.getenv("BROWSER_HEADLESS", "false").lower() in ("true", "1", "yes")
 
@@ -43,9 +47,9 @@ MAX_CONTACTS = int(os.getenv("MAX_CONTACTS", "8"))
 
 # ── SOS URL Registry ─────────────────────────────────────────
 SOS_REGISTRY = {
-    "AL": {"name": "Alabama", "url": "https://arc-sos.state.al.us/cgi/corpname.mbr"},
+    "AL": {"name": "Alabama", "url": "https://www.sos.alabama.gov/government-records/business-entity-records"},
     "AK": {"name": "Alaska", "url": "https://commerce.alaska.gov/cbp/main/search/entities"},
-    "AZ": {"name": "Arizona", "url": "https://ecorp.azcc.gov/EntitySearch/Index"},
+    "AZ": {"name": "Arizona", "url": "https://arizonabusinesscenter.azcc.gov/businesssearch"},
     "AR": {"name": "Arkansas", "url": "https://sos-corp-search.ark.org/corps"},
     "CA": {"name": "California", "url": "https://bizfileonline.sos.ca.gov/search/business"},
     "CO": {"name": "Colorado", "url": "https://sos.state.co.us/biz/BusinessEntityCriteriaExt.do"},
@@ -55,18 +59,18 @@ SOS_REGISTRY = {
     "GA": {"name": "Georgia", "url": "https://ecorp.sos.ga.gov/BusinessSearch"},
     "HI": {"name": "Hawaii", "url": "https://hbe.ehawaii.gov/documents/search.html"},
     "ID": {"name": "Idaho", "url": "https://sosbiz.idaho.gov/search/business"},
-    "IL": {"name": "Illinois", "url": "https://apps.ilsos.gov/corporatellc"},
+    "IL": {"name": "Illinois", "url": "https://apps.ilsos.gov/businessentitysearch/"},
     "IN": {"name": "Indiana", "url": "https://bsd.sos.in.gov/publicbusinesssearch"},
-    "IA": {"name": "Iowa", "url": "https://sos.iowa.gov/search/business"},
+    "IA": {"name": "Iowa", "url": "https://sos.iowa.gov/search/business/search.aspx"},
     "KS": {"name": "Kansas", "url": "https://sos.ks.gov/eforms/BusinessEntity/Search.aspx"},
     "KY": {"name": "Kentucky", "url": "https://sosbes.sos.ky.gov/BusSearchNProfile/search.aspx"},
     "LA": {"name": "Louisiana", "url": "https://coraweb.sos.la.gov/CommercialSearch/CommercialSearch.aspx"},
     "ME": {"name": "Maine", "url": "https://icrs.informe.org/nei-sos-icrs/ICRS?MainPage=x"},
     "MD": {"name": "Maryland", "url": "https://egov.maryland.gov/BusinessExpress/EntitySearch"},
     "MA": {"name": "Massachusetts", "url": "https://corp.sec.state.ma.us/corpweb/CorpSearch/CorpSearch.aspx"},
-    "MI": {"name": "Michigan", "url": "https://cofs.lara.state.mi.us/CorpWeb/CorpSearch/CorpSearch.aspx"},
+    "MI": {"name": "Michigan", "url": "https://mibusinessregistry.lara.state.mi.us/search/business"},
     "MN": {"name": "Minnesota", "url": "https://mblsportal.sos.mn.gov/Business/Search"},
-    "MS": {"name": "Mississippi", "url": "https://corp.sos.ms.gov/corp/portal/c/page/corpBusinessNameSearch"},
+    "MS": {"name": "Mississippi", "url": "https://corp.sos.ms.gov/corp/portal/c/page/corpBusinessIdSearch/portal.aspx"},
     "MO": {"name": "Missouri", "url": "https://bsd.sos.mo.gov/BusinessEntity/BESearch"},
     "MT": {"name": "Montana", "url": "https://biz.sos.mt.gov/search"},
     "NE": {"name": "Nebraska", "url": "https://www.nebraska.gov/sos/corp/corpsearch.cgi"},
@@ -93,7 +97,7 @@ SOS_REGISTRY = {
     "WV": {"name": "West Virginia", "url": "https://apps.sos.wv.gov/business/corporations"},
     "WI": {"name": "Wisconsin", "url": "https://apps.wi.gov/CorpSearch"},
     "WY": {"name": "Wyoming", "url": "https://wyobiz.wyo.gov/Business/FilingSearch.aspx"},
-    "DC": {"name": "District of Columbia", "url": "https://corponline.dcra.dc.gov/BizEntity.aspx"},
+    "DC": {"name": "District of Columbia", "url": "https://corponline.dlcp.dc.gov/homepage/business-search"},
 }
 
 # ── Statutory Agent Services (skip for person search) ─────────

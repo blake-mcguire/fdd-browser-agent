@@ -37,27 +37,43 @@ def build_xlsx(records: list[EntityRecord]) -> bytes:
     ws_co = wb.active
     ws_co.title = "Company Leads"
 
-    company_cols = [
+    # Determine max officers across all entities for dynamic columns
+    max_officers = max((len(rec.people) for rec in records), default=0)
+    max_officers = max(max_officers, 1)  # at least 1 slot
+
+    # Static columns before officers
+    static_cols_before = [
         "Entity Name", "# Locations", "States of Operation", "Primary State",
         "State of Formation", "Entity Status", "Entity Type", "Formation Date",
-        "DBA Name", "Registered Agent", "Agent Address",
-        "Officers (Names)", "Company Website", "Recent News",
+        "Registered Agent", "Agent Address",
+    ]
+
+    # Dynamic officer columns: Officer 1 Name, Officer 1 Title, Officer 1 Address, ...
+    officer_cols = []
+    for i in range(1, max_officers + 1):
+        officer_cols.extend([
+            f"Officer {i} Name",
+            f"Officer {i} Title",
+            f"Officer {i} Address",
+        ])
+
+    # Static columns after officers
+    static_cols_after = [
+        "Company Website", "Recent News",
         "Key Developments", "Risk Signals", "Company Notes",
         "Original Notes", "Source File", "Franchisor",
         "SOS Confidence", "SOS Source URL",
     ]
 
+    company_cols = static_cols_before + officer_cols + static_cols_after
     _write_header(ws_co, company_cols)
 
     for row_idx, rec in enumerate(records, 2):
         fill = ALT_FILL if row_idx % 2 == 0 else WHITE_FILL
 
-        # Build officer names summary
-        officer_names = "; ".join(
-            f"{p.name} ({p.title})" for p in rec.people
-        ) if rec.people else ""
-
         co = rec.company
+
+        # Static data before officers
         row_data = [
             rec.entity_name,
             rec.num_locations,
@@ -67,10 +83,20 @@ def build_xlsx(records: list[EntityRecord]) -> bytes:
             rec.entity_status,
             rec.entity_type,
             rec.formation_date,
-            rec.dba_name,
             rec.registered_agent,
             rec.agent_address,
-            officer_names,
+        ]
+
+        # Officer columns (3 per officer slot)
+        for i in range(max_officers):
+            if i < len(rec.people):
+                p = rec.people[i]
+                row_data.extend([p.name, p.title, p.address])
+            else:
+                row_data.extend(["", "", ""])
+
+        # Static data after officers
+        row_data.extend([
             co.website if co else "",
             co.recent_news_summary if co else "",
             "; ".join(co.key_developments) if co and co.key_developments else "",
@@ -81,7 +107,7 @@ def build_xlsx(records: list[EntityRecord]) -> bytes:
             rec.franchisor,
             rec.sos_confidence,
             rec.sos_source_url,
-        ]
+        ])
 
         for col_idx, value in enumerate(row_data, 1):
             cell = ws_co.cell(row=row_idx, column=col_idx, value=value or "")
@@ -90,10 +116,11 @@ def build_xlsx(records: list[EntityRecord]) -> bytes:
             cell.alignment = LEFT
 
     # Column widths for company sheet
-    co_widths = [
-        40, 8, 20, 8, 8, 12, 14, 14, 20, 30, 40,
-        50, 30, 50, 50, 30, 40, 40, 20, 20, 12, 50,
-    ]
+    co_widths_before = [40, 8, 20, 8, 8, 12, 14, 14, 30, 40]
+    co_widths_officers = [30, 18, 40] * max_officers
+    co_widths_after = [30, 50, 50, 30, 40, 40, 20, 20, 12, 50]
+    co_widths = co_widths_before + co_widths_officers + co_widths_after
+
     for col_idx, width in enumerate(co_widths, 1):
         ws_co.column_dimensions[openpyxl.utils.get_column_letter(col_idx)].width = width
     ws_co.freeze_panes = "A2"

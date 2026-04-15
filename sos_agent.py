@@ -96,6 +96,16 @@ def _build_sos_task(entity_name: str, state_code: str,
     portal_guide = PORTAL_INSTRUCTIONS.get(state_code, "")
     portal_section = ""
     if portal_guide:
+        # Inject credentials for states that require login
+        if state_code == "MI":
+            from config import MI_SOS_USER, MI_SOS_PASS
+            portal_guide = portal_guide.replace(
+                "the MI_SOS_USER environment variable",
+                f"'{MI_SOS_USER}'"
+            ).replace(
+                "the MI_SOS_PASS environment variable",
+                f"'{MI_SOS_PASS}'"
+            )
         portal_section = (
             f"\n\n═══ {sos['name'].upper()} PORTAL NAVIGATION GUIDE ═══\n"
             f"{portal_guide}\n"
