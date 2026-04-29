@@ -13,6 +13,7 @@ from collections import Counter, defaultdict
 import pdfplumber
 import openpyxl
 
+from config import BIZ_SUFFIXES
 from llm import call_extraction, call_structure, GeminiOverloadedError, GeminiRateLimitError, APIKeyDeadError
 
 logger = logging.getLogger("fdd-agent")
@@ -350,3 +351,75 @@ def dedup_entities(entities: list[dict]) -> list[dict]:
 
     out.sort(key=lambda x: x["num_locations"], reverse=True)
     return out
+
+
+# ── Business-vs-person classification ────────────────────────
+#
+# Entities whose "name" is actually a human's name (no LLC/Inc/Corp/LP/etc.
+# suffix) have a ~100% failure rate on SOS portals — they either error out
+# entirely or return garbage officer/agent data attached to some unrelated
+# entity that happened to share a surname.  Route those to a manual-review
+# bucket before SOS kicks off.
+
+_BIZ_SUFFIX_SET = {s.upper().rstrip(".") for s in BIZ_SUFFIXES}
+
+
+def _token_is_biz_suffix(token: str) -> bool:
+    """
+    Return True if a token matches a known corporate suffix.
+
+    All-lowercase tokens are deliberately rejected so everyday words like
+    'group' in "Randy Taylor and group" don't count as the corporate
+    'Group' suffix.  A real corporate suffix in an FDD entity name is
+    almost always capitalized or all-caps.
+    """
+    if not token or token == token.lower():
+        return False
+    normalized = token.upper().rstrip(".")
+    return normalized in _BIZ_SUFFIX_SET
+
+
+def classify_entity_type(entity_name: str) -> str:
+    """
+    Classify an entity name as 'business' or 'person'.
+
+    An entity is a BUSINESS if at least one capitalized token in the name
+    (INCLUDING any content inside parentheses) matches a known corporate
+    suffix (LLC, Inc, Corp, LLP, LP, Group, Holdings, Partners, etc.).
+
+    Paren content is checked because FDDs often render rows like
+    'Ekstrom, Dennis (DTAZ, LLC)' — the left side is a person but the
+    parens contain the real LLC, so it is still a valid SOS target.
+
+    Anything without such a suffix is classified 'person' and routed to
+    manual review rather than pushed through the SOS pipeline.
+    """
+    if not entity_name or not entity_name.strip():
+        return "person"
+    tokens = re.findall(r"[A-Za-z.&']+", entity_name)
+    for tok in tokens:
+        if _token_is_biz_suffix(tok):
+            return "business"
+    return "person"
+
+
+def split_entities_by_type(
+    entities: list[dict],
+) -> tuple[list[dict], list[dict]]:
+    """
+    Split a deduped entity list into (business_entities, person_entities).
+
+    Business entities continue into the SOS pipeline.
+    Person entities are flagged for manual web search and skipped from SOS
+    to avoid burning browser/LLM budget on lookups that are guaranteed to
+    fail or return wrong-entity data.
+    """
+    businesses: list[dict] = []
+    persons: list[dict] = []
+    for e in entities:
+        kind = classify_entity_type(e.get("entity_name", ""))
+        if kind == "business":
+            businesses.append(e)
+        else:
+            persons.append(e)
+    return businesses, persons

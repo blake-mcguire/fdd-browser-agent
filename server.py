@@ -25,9 +25,13 @@ from config import (
     GOOGLE_API_KEY, BROWSER_USE_API_KEY,
     SOS_CONCURRENCY, COMPANY_CONCURRENCY,
     PERSON_CONCURRENCY_MAX, GLOBAL_BROWSER_CAP,
+    ENRICHMENT_ENABLED,
 )
 from models import EntityRecord, PersonEntry, CompanyResult, PersonResult
-from extraction import extract_entities_from_pdf, extract_entities_from_xlsx, dedup_entities
+from extraction import (
+    extract_entities_from_pdf, extract_entities_from_xlsx, dedup_entities,
+    split_entities_by_type,
+)
 from sos_agent import sos_lookup, sos_lookup_batch, build_people_list
 from company_agent import company_enrichment
 from person_agent import person_search
@@ -239,14 +243,18 @@ async def _sos_dispatcher(worker_id: int):
             )
             job["records"].append(rec)
 
-            # Queue company enrichment (uses Browser Use Cloud key, not Gemini)
-            await _company_queue.put((job_id, entity_idx, BROWSER_USE_API_KEY))
-            job["company_total"] += 1
+            # Queue company + person enrichment — gated by ENRICHMENT_ENABLED.
+            # When the flag is off, we stop at SOS so runs stay focused on
+            # refining SOS scraping without burning enrichment credits.
+            if ENRICHMENT_ENABLED:
+                # Queue company enrichment (uses Browser Use Cloud key, not Gemini)
+                await _company_queue.put((job_id, entity_idx, BROWSER_USE_API_KEY))
+                job["company_total"] += 1
 
-            # Queue person search for each human officer/agent
-            for person in people:
-                await _person_queue.put((job_id, entity_idx, person, BROWSER_USE_API_KEY))
-                job["person_total"] += 1
+                # Queue person search for each human officer/agent
+                for person in people:
+                    await _person_queue.put((job_id, entity_idx, person, BROWSER_USE_API_KEY))
+                    job["person_total"] += 1
 
             job["sos_completed"] += 1
             _update_progress(job)
@@ -404,6 +412,7 @@ async def _company_dispatcher(worker_id: int):
                 state=rec.state,
                 franchisor=rec.franchisor,
                 api_key=api_key,
+                user_context=job.get("enrichment_context", ""),
             )
             rec.company = result
             elapsed = round(time.time() - comp_start, 1)
@@ -491,6 +500,7 @@ async def _person_dispatcher(worker_id: int):
                 entity_name=entity_name,
                 state=rec.state,
                 api_key=api_key,
+                user_context=job.get("enrichment_context", ""),
             )
             rec.person_results.append(result)
             elapsed = round(time.time() - person_start, 1)
@@ -634,10 +644,17 @@ async def process_fdd(
     file: UploadFile = File(...),
     gemini_key_override: str = Form(default=""),
     browser_use_key_override: str = Form(default=""),
+    context: str = Form(default=""),
 ):
     """
     Submit a file for processing.
     Extracts entities from PDF/XLSX, creates a job, and enqueues to the SOS pool.
+
+    `context` is free-text user-provided context about the list (e.g.,
+    "This is a Del Taco FDD list — every entity is a Del Taco franchisee").
+    It is propagated to the company + person enrichment agents so their
+    web searches are better-informed. It is NOT passed to the SOS agents,
+    which rely on rigid per-state portal walkthroughs.
     """
     gemini_key = gemini_key_override or GOOGLE_API_KEY
     bu_key = browser_use_key_override or BROWSER_USE_API_KEY
@@ -677,6 +694,22 @@ async def process_fdd(
     if not entities:
         raise HTTPException(422, "No franchisee entities found in document")
 
+    # ── Pre-filter: route person-named entities to manual review ──
+    # Entities whose "name" is actually a person's name have ~100% failure
+    # rate on SOS portals and corrupt results when forced through.  Split
+    # the list into (businesses → SOS pipeline) and (persons → manual-
+    # review bucket carried straight to the final XLSX with a flag).
+    entities, person_entities = split_entities_by_type(entities)
+    logger.info(
+        f"Entity classification: {len(entities)} business entities to SOS "
+        f"pipeline, {len(person_entities)} person-named entities routed to "
+        f"manual review"
+    )
+    if person_entities:
+        sample_names = ", ".join(e.get("entity_name", "?") for e in person_entities[:5])
+        logger.info(f"  Manual-review examples: {sample_names}"
+                    + (f" (+{len(person_entities)-5} more)" if len(person_entities) > 5 else ""))
+
     # ── Create job ──
     job_id = str(uuid.uuid4())
     run_ts = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -685,6 +718,10 @@ async def process_fdd(
         "status": "running",
         "filename": file.filename,
         "franchisor": "",  # could be detected from PDF page 1
+        # User-supplied free-text context, passed to enrichment agents only.
+        # SOS agents deliberately do NOT see this — they use the rigid
+        # per-state portal walkthroughs, not free-text hints.
+        "enrichment_context": (context or "").strip(),
         "created_at": time.time(),
         "current_step": f"Queued — {len(entities)} entities",
         "progress_pct": 0,
@@ -698,7 +735,7 @@ async def process_fdd(
         "person_total": 0,
         "person_completed": 0,
         # Results
-        "records": [],  # list[EntityRecord]
+        "records": [],  # list[EntityRecord] — includes MANUAL_REVIEW rows
         "log": [],
         "steps": [],   # structured step tracker: [{id, label, phase, status, detail, ts}]
         "output_path": None,
@@ -707,13 +744,53 @@ async def process_fdd(
         "error": "",
     }
 
+    ctx_line = ""
+    if (context or "").strip():
+        preview = (context or "").strip()
+        if len(preview) > 120:
+            preview = preview[:117] + "..."
+        ctx_line = f"\n  context=\"{preview}\""
     logger.info(
         f"\n{'═' * 72}\n"
         f"  ▶ RUN START  job={job_id[:8]}  ts={run_ts}\n"
-        f"  file={file.filename}  entities={len(entities)}  "
-        f"pools=SOS:{SOS_CONCURRENCY}/CO:{COMPANY_CONCURRENCY}/P:{PERSON_CONCURRENCY_MAX}\n"
+        f"  file={file.filename}  entities={len(entities)} (SOS) + "
+        f"{len(person_entities)} (manual review)  "
+        f"pools=SOS:{SOS_CONCURRENCY}/CO:{COMPANY_CONCURRENCY}/P:{PERSON_CONCURRENCY_MAX}"
+        f"{ctx_line}\n"
         f"{'═' * 72}"
     )
+
+    # ── Seed manual-review records now — they bypass SOS entirely ──
+    # Person-named rows (no LLC/Inc/Corp/LP/Group/etc. suffix) are appended
+    # directly to job['records'] with a MANUAL_REVIEW flag. They appear on
+    # the Company Leads sheet alongside SOS-processed rows but are visually
+    # distinguished by an amber fill and the MANUAL_REVIEW confidence, so
+    # the downstream manual-search step can filter on them.
+    for e in person_entities:
+        rec = EntityRecord(
+            entity_name=e.get("entity_name", "?"),
+            state=e.get("state", ""),
+            num_locations=e.get("num_locations", 1),
+            all_states=e.get("all_states", e.get("state", "")),
+            address=e.get("address", ""),
+            original_notes=e.get("notes", ""),
+            source_file=file.filename or "",
+            franchisor="",
+            registered_agent="N/A",
+            agent_address="N/A",
+            entity_status="N/A",
+            formation_date="N/A",
+            entity_type="N/A",
+            dba_name="N/A",
+            sos_source_url="",
+            sos_confidence="MANUAL_REVIEW",
+            sos_error="Name has no business suffix (LLC/Inc/Corp/LP/Group/etc.); held for a separate manual web-search step.",
+            people=[],
+        )
+        _jobs[job_id]["records"].append(rec)
+    # These rows don't go through SOS, so don't count them in sos_total.
+    # They're already in records[] and will flow through to the final XLSX
+    # on the Company Leads sheet with the MANUAL_REVIEW flag.
 
     # ── Group entities by state, enqueue as batches ──
     from collections import defaultdict

@@ -25,6 +25,11 @@ MI_SOS_PASS = os.getenv("MI_SOS_PASS", "")
 # ── Browser ──────────────────────────────────────────────────
 BROWSER_HEADLESS = os.getenv("BROWSER_HEADLESS", "false").lower() in ("true", "1", "yes")
 
+# ── Pipeline toggles ──────────────────────────────────────────
+# Temporarily sever company & person enrichment while tuning SOS.
+# Set to "true" to re-enable downstream enrichment.
+ENRICHMENT_ENABLED = os.getenv("ENRICHMENT_ENABLED", "false").lower() in ("true", "1", "yes")
+
 # ── Concurrency ───────────────────────────────────────────────
 SOS_CONCURRENCY = int(os.getenv("SOS_CONCURRENCY", "3"))
 COMPANY_CONCURRENCY = int(os.getenv("COMPANY_CONCURRENCY", "5"))
@@ -39,6 +44,40 @@ PERSON_TIMEOUT = int(os.getenv("PERSON_TIMEOUT", "180"))
 # ── Agent step limits ─────────────────────────────────────────
 SOS_MAX_STEPS = int(os.getenv("SOS_MAX_STEPS", "15"))
 SOS_INTER_ENTITY_DELAY = float(os.getenv("SOS_INTER_ENTITY_DELAY", "2.0"))  # seconds between entities per worker
+
+# ── SOS result validation + retry ─────────────────────────────
+# Number of extra attempts allowed when the first run returns an incomplete
+# SOS result (missing required fields for the state). On retry, the previous
+# failure reason is injected into the agent's task prompt.
+SOS_VALIDATION_RETRIES = int(os.getenv("SOS_VALIDATION_RETRIES", "1"))
+
+# Per-state success criteria. Each entry specifies which SOSResult fields MUST
+# be populated (not empty, not "UNKNOWN") for a result to count as valid, and
+# whether at least one officer is required.
+#
+# States absent from this dict use SOS_DEFAULT_CRITERIA.
+# Tune these as you refine each state's walkthrough.
+SOS_DEFAULT_CRITERIA = {
+    "required_fields": ["entity_status", "registered_agent"],
+    "require_officers": True,
+}
+SOS_SUCCESS_CRITERIA = {
+    # Paywalled / minimal-data states (officers not obtainable or not present)
+    "ME": {"required_fields": ["entity_status"],                         "require_officers": False},
+    "SC": {"required_fields": ["entity_status", "registered_agent"],     "require_officers": False},
+    "TN": {"required_fields": ["entity_status", "registered_agent"],     "require_officers": False},
+    "TX": {"required_fields": ["entity_status", "registered_agent"],     "require_officers": False},
+    "WI": {"required_fields": ["entity_status", "registered_agent"],     "require_officers": False},
+    "WY": {"required_fields": ["entity_status", "registered_agent"],     "require_officers": True},
+    # PA sidebar has status + officers but no registered agent
+    "PA": {"required_fields": ["entity_status"],                         "require_officers": True},
+    # AR often paywalls officer data
+    "AR": {"required_fields": ["entity_status", "registered_agent"],     "require_officers": False},
+    # MD "Resident Agent" only — officers behind annual report filings
+    "MD": {"required_fields": ["entity_status", "registered_agent"],     "require_officers": False},
+    # HI / MA — officers usually exposed, agent required
+    # (use default)
+}
 COMPANY_MAX_STEPS = int(os.getenv("COMPANY_MAX_STEPS", "10"))
 PERSON_MAX_STEPS = int(os.getenv("PERSON_MAX_STEPS", "12"))
 
@@ -52,7 +91,7 @@ SOS_REGISTRY = {
     "AZ": {"name": "Arizona", "url": "https://arizonabusinesscenter.azcc.gov/businesssearch"},
     "AR": {"name": "Arkansas", "url": "https://sos-corp-search.ark.org/corps"},
     "CA": {"name": "California", "url": "https://bizfileonline.sos.ca.gov/search/business"},
-    "CO": {"name": "Colorado", "url": "https://sos.state.co.us/biz/BusinessEntityCriteriaExt.do"},
+    "CO": {"name": "Colorado", "url": "https://www.sos.state.co.us/ucc/pages/biz/bizSearch.xhtml"},
     "CT": {"name": "Connecticut", "url": "https://service.ct.gov/business/s/onlinebusinesssearch"},
     "DE": {"name": "Delaware", "url": "https://icis.corp.delaware.gov/ecorp/entitysearch/namesearch.aspx"},
     "FL": {"name": "Florida", "url": "https://search.sunbiz.org/Inquiry/CorporationSearch/ByName"},

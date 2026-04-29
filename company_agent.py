@@ -34,10 +34,16 @@ async def company_enrichment(
     state: str,
     franchisor: str,
     api_key: str,
+    user_context: str = "",
 ) -> CompanyResult:
     """
     Search the web for company-level intelligence about a franchise entity.
     Uses Browser Use Cloud for managed browser automation.
+
+    `user_context` is free-text context provided at upload time (e.g.
+    "This is a Del Taco FDD list"). It's prepended to the task prompt
+    so the agent can use the information to disambiguate search results
+    and focus on the right company.
     """
     start = time.time()
     key = api_key or BROWSER_USE_API_KEY
@@ -49,23 +55,74 @@ async def company_enrichment(
         context_parts.append(state)
     search_context = " ".join(context_parts)
 
-    task = f"""Research the company "{entity_name}" for a sales intelligence report.
+    has_context = bool((user_context or "").strip())
+    user_context_block = ""
+    if has_context:
+        user_context_block = f"""═══ USER-PROVIDED LIST CONTEXT ═══
+{user_context.strip()}
+
+TREAT THIS CONTEXT AS AUTHORITATIVE for every entity in this batch.
+Two concrete ways you MUST use it:
+
+1) SEARCH QUERY CONSTRUCTION — when building Google searches, include
+   the BRAND / FRANCHISE / PARENT-COMPANY name from the context above
+   alongside the entity name. The shell LLC ("{entity_name}") is often
+   invisible online; the brand name is what surfaces the right results.
+
+   Example — if the context says "This is a Del Taco FDD list", your
+   queries should look like:
+     '"{entity_name}" Del Taco'
+     '"{entity_name}" Del Taco franchisee news'
+     'Del Taco franchise {state} owner'
+   BEFORE you fall back to the shell-LLC-only query.
+
+2) RESULT DISAMBIGUATION — when multiple companies share a name,
+   pick the one that fits the list context. Filter news/press to
+   what is actually relevant to the list's domain.
+═══ END LIST CONTEXT ═══
+
+"""
+
+    # Build search-query recipes. When user context is provided we
+    # prepend context-brand queries because they vastly out-recall
+    # shell-LLC queries for franchise entities.
+    if has_context:
+        site_query = (f"1. Find the company's official website:\n"
+                      f"   PRIMARY: '\"{entity_name}\" <brand-from-context>'\n"
+                      f"   FALLBACK: {search_context}\n"
+                      f"   (Replace <brand-from-context> with the franchise/parent-company name\n"
+                      f"   extracted from the LIST CONTEXT block above.)")
+        news_query = (f"2. Search for recent news and articles:\n"
+                      f"   PRIMARY: '\"{entity_name}\" <brand-from-context> news'\n"
+                      f"   FALLBACK: '{search_context} news'\n"
+                      f"   Look for: expansions, closures, leadership changes, acquisitions,\n"
+                      f"   lawsuits, regulatory issues, awards, or recognition.\n"
+                      f"   Visit 2-3 relevant results and summarize.")
+        pr_query = (f"3. Search for press releases:\n"
+                    f"   PRIMARY: '\"{entity_name}\" <brand-from-context> press release'\n"
+                    f"   FALLBACK: '{search_context} press release'")
+    else:
+        site_query = (f"1. Find the company's official website:\n"
+                      f"   Search: {search_context}")
+        news_query = (f"2. Search for recent news and articles:\n"
+                      f"   Search: {search_context} news\n"
+                      f"   Look for: expansions, closures, leadership changes, acquisitions,\n"
+                      f"   lawsuits, regulatory issues, awards, or recognition.\n"
+                      f"   Visit 2-3 relevant results and summarize.")
+        pr_query = (f"3. Search for press releases:\n"
+                    f"   Search: {search_context} press release")
+
+    task = f"""{user_context_block}Research the company "{entity_name}" for a sales intelligence report.
 {f'This company is a franchisee of {franchisor}.' if franchisor else ''}
 {f'They operate in {state}.' if state else ''}
 
 Search Google for the following and visit the most relevant results:
 
-1. Find the company's official website:
-   Search: {search_context}
+{site_query}
 
-2. Search for recent news and articles:
-   Search: {search_context} news
-   Look for: expansions, closures, leadership changes, acquisitions,
-   lawsuits, regulatory issues, awards, or recognition.
-   Visit 2-3 relevant results and summarize.
+{news_query}
 
-3. Search for press releases:
-   Search: {search_context} press release
+{pr_query}
 
 Compile your findings. Only report what you actually find — do NOT fabricate.
 Focus on the last 2-3 years. If nothing found, say "No information found."

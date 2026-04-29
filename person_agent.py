@@ -45,6 +45,7 @@ async def person_search(
     entity_name: str,
     state: str,
     api_key: str,
+    user_context: str = "",
 ) -> PersonResult:
     """
     Research a person's professional background, focused on LinkedIn resolution.
@@ -56,6 +57,11 @@ async def person_search(
 
     Contact info is NOT explicitly searched for — it's captured only
     if it shows up organically in search results or profile pages.
+
+    `user_context` is free-text context provided at upload time (e.g.
+    "This is a Del Taco FDD list — every entity is a Del Taco franchisee").
+    It's prepended to the task prompt so the agent can disambiguate the
+    correct person and verify them against the list's known pattern.
     """
     start = time.time()
     key = api_key or BROWSER_USE_API_KEY
@@ -64,13 +70,59 @@ async def person_search(
     title = person.title
     address = person.address
 
-    task = f"""Research the professional background of "{person_name}" who is
+    has_context = bool((user_context or "").strip())
+    user_context_block = ""
+    if has_context:
+        user_context_block = f"""═══ USER-PROVIDED LIST CONTEXT ═══
+{user_context.strip()}
+
+TREAT THIS CONTEXT AS AUTHORITATIVE for every person in this batch.
+Two concrete ways you MUST use it:
+
+1) SEARCH QUERY CONSTRUCTION — when building Google searches for this
+   person, include the BRAND / FRANCHISE / PARENT-COMPANY name from
+   the context above alongside the person's name. The LLC/shell name
+   ("{entity_name}") is often invisible online; the brand name is how
+   people are actually indexed on LinkedIn, news, and directories.
+
+   Example — if the context says "This is a Del Taco FDD list", your
+   queries should look like:
+     '"{person_name}" "Del Taco" LinkedIn'
+     '"{person_name}" Del Taco franchise {state}'
+     '"{person_name}" Del Taco owner'
+   BEFORE you fall back to the shell-LLC query.
+
+2) PROFILE VERIFICATION — reject LinkedIn profiles that don't fit
+   the context's pattern (e.g., reject a software-engineer profile
+   when the context says this is a restaurant-franchise list), even
+   if the name and state match.
+═══ END LIST CONTEXT ═══
+
+"""
+
+    # Build state-aware context-brand queries only when user_context is present.
+    if has_context:
+        step1_queries = f"""- Search Google with queries built from the LIST CONTEXT above.
+  Start with brand-first queries, since the shell LLC name is usually
+  invisible online:
+    1. '"{person_name}" <brand-from-context> LinkedIn'
+    2. '"{person_name}" <brand-from-context> {state}'
+    3. '"{person_name}" <brand-from-context> franchise owner'
+  (Replace <brand-from-context> with the franchise/parent-company name
+  extracted from the list context block above.)
+- Only after those fail, fall back to the shell LLC:
+    4. '"{person_name}" "{entity_name}" LinkedIn'
+    5. '"{person_name}" {state} LinkedIn'"""
+    else:
+        step1_queries = f"""- Search Google: "{person_name}" "{entity_name}" LinkedIn
+- If no results, try: "{person_name}" {state} LinkedIn"""
+
+    task = f"""{user_context_block}Research the professional background of "{person_name}" who is
 the {title} of "{entity_name}" in {state}.
 
 STEP 1 — Find their LinkedIn profile:
-- Search Google: "{person_name}" "{entity_name}" LinkedIn
-- If no results, try: "{person_name}" {state} LinkedIn
-- Verify the profile matches (same company, same state, same role)
+{step1_queries}
+- Verify the profile matches (same company or franchise, same state, same role)
 - From the profile, note: profile URL, headline, location, current position
 
 STEP 2 — Gather professional context:

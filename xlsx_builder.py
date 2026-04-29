@@ -20,6 +20,8 @@ HEADER_FILL = PatternFill("solid", fgColor="1F4E79")
 HEADER_FONT = Font(bold=True, color="FFFFFF", size=10)
 ALT_FILL = PatternFill("solid", fgColor="D6E4F0")
 WHITE_FILL = PatternFill("solid", fgColor="FFFFFF")
+# Amber tint for rows routed to manual web search (SOS skipped).
+MANUAL_REVIEW_FILL = PatternFill("solid", fgColor="FFE8B0")
 BODY_FONT = Font(size=10)
 CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
 LEFT = Alignment(horizontal="left", vertical="center", wrap_text=True)
@@ -28,8 +30,10 @@ LEFT = Alignment(horizontal="left", vertical="center", wrap_text=True)
 def build_xlsx(records: list[EntityRecord]) -> bytes:
     """
     Build a two-tab XLSX:
-      Tab 1: Company Lead Sheet (one row per entity)
-      Tab 2: Person Lead Sheet (one row per person per entity)
+      Tab 1: Company Leads (one row per entity — includes both SOS-processed
+             business entities and person-named rows flagged MANUAL_REVIEW
+             for the downstream manual web-search step)
+      Tab 2: Person Leads  (one row per officer/agent found via SOS)
     """
     wb = openpyxl.Workbook()
 
@@ -69,7 +73,12 @@ def build_xlsx(records: list[EntityRecord]) -> bytes:
     _write_header(ws_co, company_cols)
 
     for row_idx, rec in enumerate(records, 2):
-        fill = ALT_FILL if row_idx % 2 == 0 else WHITE_FILL
+        # MANUAL_REVIEW rows get an amber tint so they're visually obvious
+        # on the sheet. Everything else uses the normal zebra stripe.
+        if (rec.sos_confidence or "").upper() == "MANUAL_REVIEW":
+            fill = MANUAL_REVIEW_FILL
+        else:
+            fill = ALT_FILL if row_idx % 2 == 0 else WHITE_FILL
 
         co = rec.company
 

@@ -18,6 +18,7 @@ from config import (
     GOOGLE_API_KEY, SOS_REGISTRY, SOS_TIMEOUT, SOS_MAX_STEPS,
     SOS_INTER_ENTITY_DELAY, STATUTORY_AGENTS, BIZ_SUFFIXES, is_statutory,
     SOS_BROWSER_MODEL, BROWSER_HEADLESS, GLOBAL_BROWSER_CAP,
+    SOS_VALIDATION_RETRIES, SOS_SUCCESS_CRITERIA, SOS_DEFAULT_CRITERIA,
 )
 from models import Officer, SOSResult, PersonEntry
 from llm import classify_name, GeminiOverloadedError
@@ -56,6 +57,10 @@ class SOSExtraction(BaseModel):
     dba_name: str = ""
     officers: list[SOSOfficer] = []
     confidence: str = "LOW"
+    # Agent's own self-report — populated before finalizing. Forces the LLM to
+    # literally state what it captured, which surfaces empty-officers cases
+    # (e.g. UT clicking 'Associated DBAs' before gathering Principals).
+    checkpoint: str = ""
 
 
 # ── LLM + Browser setup ─────────────────────────────────────
@@ -87,8 +92,78 @@ def _new_browser() -> Browser:
 
 # ── Task prompt builder ──────────────────────────────────────
 
-def _build_sos_task(entity_name: str, state_code: str,
-                    name_type: str, first_name: str, last_name: str) -> str:
+def _state_criteria(state_code: str) -> dict:
+    return SOS_SUCCESS_CRITERIA.get(state_code, SOS_DEFAULT_CRITERIA)
+
+
+def _build_checkpoint_directive(state_code: str) -> str:
+    """Universal self-report + completion-gate appended to every SOS task."""
+    crit = _state_criteria(state_code)
+    req = ", ".join(crit["required_fields"])
+    officers_rule = (
+        "officers_count MUST be >= 1 UNLESS the detail page genuinely has no "
+        "officer/principal/member/manager section visible (in which case set "
+        "checkpoint note: 'no_officers_section_present')"
+        if crit["require_officers"]
+        else "officers_count may be 0 for this state"
+    )
+    return f"""
+
+═══ COMPLETION GATE — READ BEFORE FINALIZING ═══
+Before emitting your final structured output you MUST populate the
+`checkpoint` field with a single line in EXACTLY this format:
+
+CHECKPOINT: status=<value>, agent=<value>, agent_address=<value>, officers_count=<N>, dbas_count=<N>
+
+Rules for this state ({state_code}):
+- Required fields (must not be empty/UNKNOWN): {req}
+- {officers_rule}
+
+If ANY required field is still empty, OR officers_count=0 when officers are
+required, DO NOT finalize. Go back to the detail page, scroll, expand any
+collapsed panels (Officers / Principals / Members / Managers / Governors /
+Parties / Governing Authorities / Additional Details / etc.), and re-extract
+before writing the final output. Never navigate AWAY from the detail page
+(e.g., to an 'Associated DBAs' or 'Filing History' sub-page) until all
+required fields on the current page have been captured.
+
+Do NOT declare success if the checkpoint values contradict the rules above.
+═══ END COMPLETION GATE ═══
+"""
+
+
+def _retry_preamble(previous_failure: str, state_code: str) -> str:
+    """Prepended to the task on a retry attempt — tells the agent what to fix."""
+    if not previous_failure:
+        return ""
+    return f"""⚠ RETRY ATTEMPT — the previous run of this task failed validation.
+
+FAILURE REASON FROM PREVIOUS ATTEMPT:
+  {previous_failure}
+
+This attempt MUST specifically fix the issue above. Common causes:
+- Navigating away from the detail page before collecting all required fields.
+- Missing a collapsed/expandable section (Principals, Additional Details,
+  Parties, Managers, etc.) — expand EVERY collapsible section.
+- Reading the page before an Ajax load finished — wait for the table or
+  section to render before extracting.
+- Clicking the wrong 'Details' / hyperlink on the results table — pick the
+  exact or closest name match only.
+
+Proceed with the full walkthrough below, but prioritize filling the field(s)
+that were missing last time.
+
+"""
+
+
+def _build_sos_task(
+    entity_name: str,
+    state_code: str,
+    name_type: str,
+    first_name: str,
+    last_name: str,
+    previous_failure: str = "",
+) -> str:
     sos = SOS_REGISTRY[state_code]
     search_name = re.sub(r'\s*\(.*?\)', '', entity_name).strip()
 
@@ -112,8 +187,11 @@ def _build_sos_task(entity_name: str, state_code: str,
             f"═══ END PORTAL GUIDE ═══\n"
         )
 
+    retry_section = _retry_preamble(previous_failure, state_code)
+    completion_gate = _build_checkpoint_directive(state_code)
+
     if name_type == "PERSON":
-        return f"""Navigate to {sos['url']}
+        body = f"""Navigate to {sos['url']}
 
 This is the {sos['name']} Secretary of State business entity search.
 {portal_section}
@@ -129,7 +207,7 @@ Search by OFFICER/AGENT name if available:
 Report exact data only. Do NOT fabricate."""
 
     elif name_type == "AMBIGUOUS":
-        return f"""Navigate to {sos['url']}
+        body = f"""Navigate to {sos['url']}
 
 This is the {sos['name']} Secretary of State business entity search.
 {portal_section}
@@ -142,7 +220,7 @@ registered agent + address, and ALL officers with names, titles, and addresses.
 Report exact data only. Do NOT fabricate."""
 
     else:
-        return f"""Navigate to {sos['url']}
+        body = f"""Navigate to {sos['url']}
 
 This is the {sos['name']} Secretary of State business entity search.
 {portal_section}
@@ -165,6 +243,8 @@ CRITICAL — Officers/Members/Managers/Directors:
 If no results, retry without "Inc.", "LLC", etc., then try first 2-3 words only.
 Report EXACTLY what the page shows. Do NOT invent data."""
 
+    return retry_section + body + completion_gate
+
 
 # ── Parse agent result into SOSResult ────────────────────────
 
@@ -179,6 +259,12 @@ def _parse_agent_result(
             Officer(name=o.name, title=o.title or "UNKNOWN", address=o.address or "UNKNOWN")
             for o in (data.officers or []) if o.name and not is_statutory(o.name)
         ]
+        # Checkpoint is stashed in raw_text so the validator can see self-reported
+        # confirmations like 'no_officers_section_present' without a schema change
+        # on the main SOSResult model.
+        checkpoint = (data.checkpoint or "").strip()
+        if checkpoint:
+            logger.info(f"SOS checkpoint [{state_code}/{entity_name}]: {checkpoint[:200]}")
         return SOSResult(
             entity_name=entity_name, state=state_code,
             registered_agent=data.registered_agent or "UNKNOWN",
@@ -190,6 +276,7 @@ def _parse_agent_result(
             officers=officers,
             source_url=SOS_REGISTRY[state_code]["url"],
             confidence=data.confidence or "LOW",
+            raw_text=checkpoint,
         )
 
     # Fallback: try final_result text
@@ -202,20 +289,106 @@ def _parse_agent_result(
     )
 
 
+# ── Result validation ────────────────────────────────────────
+
+_EMPTY_VALUES = {"", "UNKNOWN", "NOT FOUND", "N/A", "NONE", "NOT AVAILABLE"}
+
+
+def _is_populated(value: str) -> bool:
+    return bool(value) and value.strip().upper() not in _EMPTY_VALUES
+
+
+def _completeness_score(result: SOSResult) -> int:
+    """
+    Score how complete a SOSResult is. Used to keep the best result across
+    retry attempts so a degraded retry can never overwrite a better first pass.
+    """
+    if result is None or result.confidence == "FAILED":
+        return 0
+    score = 0
+    # Core identity fields — heavy weight
+    if _is_populated(getattr(result, "entity_status", "") or ""):
+        score += 10
+    if _is_populated(getattr(result, "registered_agent", "") or ""):
+        score += 10
+    # Supporting fields
+    for field in ("agent_address", "formation_date", "entity_type", "dba_name"):
+        if _is_populated(getattr(result, field, "") or ""):
+            score += 2
+    # Each captured officer is worth more than any single supporting field
+    score += 5 * len(result.officers or [])
+    return score
+
+
+def validate_sos_result(result: SOSResult) -> tuple[bool, str]:
+    """
+    Check the SOSResult against per-state success criteria.
+
+    Returns (is_valid, failure_reason). A failure_reason is a short,
+    human-readable string suitable for injecting into a retry prompt.
+    """
+    # Already-failed results don't get re-validated
+    if result.confidence == "FAILED":
+        return False, result.error or "Agent marked run as FAILED"
+
+    criteria = _state_criteria(result.state)
+    missing = []
+    for field in criteria["required_fields"]:
+        val = (getattr(result, field, "") or "").strip()
+        if val.upper() in _EMPTY_VALUES:
+            missing.append(field)
+
+    if missing:
+        return False, (
+            f"Required field(s) missing or UNKNOWN on the detail page: "
+            f"{', '.join(missing)}. Re-open the detail page, scroll, expand "
+            f"any collapsed sections, and capture {', '.join(missing)} "
+            f"before finalizing."
+        )
+
+    if criteria["require_officers"] and not result.officers:
+        # Accept empty-officers if the agent's checkpoint explicitly confirmed
+        # there was no officer section on the page. We infer this from the
+        # raw_text if present.
+        checkpoint_note = (result.raw_text or "").lower()
+        if "no_officers_section_present" in checkpoint_note:
+            return True, ""
+        # When the registered agent is a known statutory service (CT Corp,
+        # COGENCY, NRAI, Northwest…), the principals/members section is
+        # routinely empty — the entity uses a third-party agent and lists no
+        # internal officers on the SOS page. Retrying makes the agent wander
+        # and usually corrupts the otherwise-good capture.
+        if is_statutory(result.registered_agent or ""):
+            return True, ""
+        return False, (
+            "No officers/principals/members/managers were captured, but this "
+            "state typically exposes them on the detail page. Scroll to the "
+            "Principal/Officers/Members/Managers/Governors/Parties section, "
+            "expand any collapsed panels or drop-downs, and capture every "
+            "row. Only mark the section as empty if it is visibly empty."
+        )
+
+    return True, ""
+
+
 # ── Single entity lookup ─────────────────────────────────────
 
-async def _run_single_sos(
+async def _run_sos_once(
     entity_name: str,
     state_code: str,
     api_key: str,
     browser: Browser,
+    previous_failure: str = "",
 ) -> SOSResult:
-    """Run SOS lookup for one entity using a shared browser instance."""
+    """Single agent run — no retry logic. Returns a SOSResult (possibly invalid)."""
     search_name = re.sub(r'\s*\(.*?\)', '', entity_name).strip()
     name_type, first_name, last_name = classify_name(search_name)
     logger.info(f"Name classification for '{search_name}': {name_type}")
 
-    task = _build_sos_task(entity_name, state_code, name_type, first_name, last_name)
+    task = _build_sos_task(
+        entity_name, state_code, name_type, first_name, last_name,
+        previous_failure=previous_failure,
+    )
     llm = _build_llm(api_key)
     fallback = _build_fallback_llm(api_key)
 
@@ -252,6 +425,78 @@ async def _run_single_sos(
             source_url=SOS_REGISTRY[state_code]["url"],
             confidence="FAILED", error=str(e)[:500],
         )
+
+
+async def _run_single_sos(
+    entity_name: str,
+    state_code: str,
+    api_key: str,
+    browser: Browser,
+) -> SOSResult:
+    """
+    Run SOS lookup with validation + retry.
+
+    First attempt runs cleanly. If the result fails per-state validation
+    (e.g., missing required fields, no officers on a state that requires
+    them), we retry up to SOS_VALIDATION_RETRIES more times with the
+    failure reason injected into the task prompt so the agent can
+    specifically address what went wrong.
+    """
+    previous_failure = ""
+    best: SOSResult | None = None
+    best_score = -1
+
+    for attempt in range(1 + SOS_VALIDATION_RETRIES):
+        if attempt > 0:
+            logger.warning(
+                f"SOS retry #{attempt} for {entity_name}/{state_code} — "
+                f"reason: {previous_failure[:120]}"
+            )
+
+        result = await _run_sos_once(
+            entity_name, state_code, api_key, browser,
+            previous_failure=previous_failure,
+        )
+
+        score = _completeness_score(result)
+        if score > best_score:
+            best, best_score = result, score
+
+        is_valid, reason = validate_sos_result(result)
+        if is_valid:
+            if attempt > 0:
+                logger.info(
+                    f"SOS retry succeeded for {entity_name}/{state_code} "
+                    f"after {attempt} retry attempt(s)"
+                )
+            return result
+
+        previous_failure = reason
+        # If the agent itself errored out (timeout, 503, browser crash),
+        # no point in retrying with a "fix your extraction" prompt — bail
+        # with whatever the best prior attempt was (if any).
+        if result.confidence == "FAILED":
+            return best if best_score > 0 else result
+
+    # All retries exhausted — return the BEST result seen across attempts
+    # with a degraded confidence and an explanatory error.
+    if best is not None:
+        best.confidence = "LOW"
+        suffix = f"Validation failed after {SOS_VALIDATION_RETRIES + 1} attempt(s): {previous_failure}"
+        best.error = (best.error + " | " if best.error else "") + suffix
+        logger.warning(
+            f"SOS validation gave up for {entity_name}/{state_code} "
+            f"(best_score={best_score}): {previous_failure[:200]}"
+        )
+        return best
+
+    # Safety net (should not hit)
+    return SOSResult(
+        entity_name=entity_name, state=state_code,
+        source_url=SOS_REGISTRY[state_code]["url"],
+        confidence="FAILED",
+        error="No result produced after retry loop",
+    )
 
 
 # ── Single entity lookup (standalone) ────────────────────────

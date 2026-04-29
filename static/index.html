@@ -69,6 +69,18 @@
   #file-name { font-size: 0.82rem; color: var(--blue-dark); margin-top: 10px;
     font-weight: 500; min-height: 1.2em; }
 
+  .ctx-label { display: block; font-size: 0.78rem; color: var(--muted);
+    margin-top: 16px; margin-bottom: 6px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.05em; }
+  .ctx-help { font-size: 0.74rem; color: var(--muted); margin-top: -4px;
+    margin-bottom: 8px; font-style: italic; }
+  #context-input { width: 100%; min-height: 72px; padding: 10px 12px;
+    border: 1px solid var(--border); border-radius: 8px; font-size: 0.86rem;
+    font-family: inherit; resize: vertical; background: var(--bg);
+    color: var(--text); }
+  #context-input:focus { outline: none; border-color: var(--blue-dark);
+    background: var(--surface); }
+
   .run-btn {
     margin-top: 16px; width: 100%; padding: 11px; background: var(--blue-dark);
     color: #fff; border: none; border-radius: 8px; font-size: 0.95rem;
@@ -316,6 +328,11 @@
     </div>
     <input type="file" id="file-input" accept=".pdf,.xlsx,.xls,.csv">
     <div id="file-name"></div>
+
+    <label class="ctx-label" for="context-input">Enrichment Context (optional)</label>
+    <p class="ctx-help">Free-text context about this list — passed to company &amp; person enrichment agents (not SOS). e.g. "This is a Del Taco FDD list; treat every entity as a franchisee of Del Taco LLC."</p>
+    <textarea id="context-input" placeholder="Describe the list so enrichment agents search with the right assumptions…"></textarea>
+
     <button class="run-btn" id="run-btn" disabled onclick="startJob()">Run Pipeline</button>
   </div>
 
@@ -367,9 +384,12 @@ async function startJob() {
   btn.disabled = true; btn.classList.add('parsing');
   btn.innerHTML = '<span class="spinner"></span>Parsing Data\u2026';
   document.getElementById('file-name').textContent = '';
+  document.getElementById('context-input').value = '';
 
   const fd = new FormData();
   fd.append('file', selectedFile);
+  const ctx = document.getElementById('context-input').value.trim();
+  if (ctx) fd.append('context', ctx);
 
   const resetBtn = () => { btn.disabled = true; btn.classList.remove('parsing'); btn.innerHTML = 'Run Pipeline'; };
 
