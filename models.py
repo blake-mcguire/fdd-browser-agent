@@ -1,12 +1,10 @@
 """
-Pydantic models for SOS, company enrichment, and person search results.
+Pydantic models for SOS lookup results.
 """
 
-from typing import Optional, List
+from typing import List
 from pydantic import BaseModel
 
-
-# ── SOS Models ────────────────────────────────────────────────
 
 class Officer(BaseModel):
     name: str
@@ -30,41 +28,8 @@ class SOSResult(BaseModel):
     error: str = ""
 
 
-# ── Company Enrichment Models ─────────────────────────────────
-
-class CompanyResult(BaseModel):
-    entity_name: str
-    website: str = ""
-    recent_news_summary: str = ""
-    key_developments: List[str] = []
-    risk_signals: List[str] = []
-    notes: str = ""
-    error: str = ""
-
-
-# ── Person Search Models ──────────────────────────────────────
-
-class PersonResult(BaseModel):
-    entity_name: str
-    person_name: str
-    title: str = ""
-    sos_address: str = ""
-    linkedin_url: str = ""
-    linkedin_location: str = ""      # city/metro from LinkedIn — key for downstream enrichment
-    linkedin_headline: str = ""
-    personal_phone: str = ""
-    business_phone: str = ""
-    email: str = ""
-    home_address: str = ""
-    background: str = ""
-    years_with_org: str = ""
-    error: str = ""
-
-
-# ── Unified Entity Record (used during pipeline processing) ──
-
 class PersonEntry(BaseModel):
-    """A person found via SOS, before enrichment."""
+    """A person found via SOS (officer, member, or registered agent)."""
     name: str
     title: str = ""
     address: str = ""
@@ -73,15 +38,14 @@ class PersonEntry(BaseModel):
 
 
 class EntityRecord(BaseModel):
-    """Full pipeline state for one entity."""
+    """One row's pipeline state — input metadata + SOS findings."""
     entity_name: str
     state: str
-    num_locations: int = 1
-    all_states: str = ""
+    # 1-based row number in the original input XLSX. The output writer uses
+    # this to append owner-name columns to the exact same row.
+    original_row_index: int = 0
     address: str = ""
-    original_notes: str = ""
     source_file: str = ""
-    franchisor: str = ""
 
     # SOS results
     registered_agent: str = "UNKNOWN"
@@ -94,9 +58,4 @@ class EntityRecord(BaseModel):
     sos_confidence: str = ""
     sos_error: str = ""
 
-    # Company enrichment
-    company: Optional[CompanyResult] = None
-
-    # People found + enriched
     people: List[PersonEntry] = []
-    person_results: List[PersonResult] = []

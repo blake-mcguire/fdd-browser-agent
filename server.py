@@ -1,10 +1,14 @@
 """
-FDD Lead Enrichment Agent — Server v5
-Three-pool architecture: SOS → Company Enrichment + Person Search → XLSX output.
+Business Owner Lookup — Server v6
+
+Input: a Google Places XLSX with one business per row.
+Output: the same XLSX with "Owner 1..N" columns appended, populated from SOS.
+
+Single-pool architecture: SOS only. Company / person enrichment removed —
+this pipeline only resolves business name + state to owner names.
 """
 
 import asyncio
-import json
 import logging
 import os
 import time
@@ -13,7 +17,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -22,20 +26,12 @@ import uvicorn
 load_dotenv()
 
 from config import (
-    GOOGLE_API_KEY, BROWSER_USE_API_KEY,
-    SOS_CONCURRENCY, COMPANY_CONCURRENCY,
-    PERSON_CONCURRENCY_MAX, GLOBAL_BROWSER_CAP,
-    ENRICHMENT_ENABLED,
+    GOOGLE_API_KEY, SOS_CONCURRENCY, GLOBAL_BROWSER_CAP,
 )
-from models import EntityRecord, PersonEntry, CompanyResult, PersonResult
-from extraction import (
-    extract_entities_from_pdf, extract_entities_from_xlsx, dedup_entities,
-    split_entities_by_type,
-)
-from sos_agent import sos_lookup, sos_lookup_batch, build_people_list
-from company_agent import company_enrichment
-from person_agent import person_search
-from xlsx_builder import build_xlsx, write_audit_trail
+from models import EntityRecord
+from extraction import extract_businesses_from_xlsx
+from sos_agent import sos_lookup_batch, build_people_list
+from xlsx_builder import build_xlsx_with_owners, write_audit_trail
 from llm import is_key_dead, APIKeyDeadError, GeminiOverloadedError, GeminiRateLimitError
 
 
@@ -71,15 +67,12 @@ JOBS_DIR.mkdir(parents=True, exist_ok=True)
 BOOT_ID = str(uuid.uuid4())
 
 logger.info(
-    f"═══ SERVER BOOT ═══  ts={_server_start_ts}  boot_id={BOOT_ID}  "
-    f"sos={SOS_CONCURRENCY}  company={COMPANY_CONCURRENCY}  person_max={PERSON_CONCURRENCY_MAX}"
+    f"═══ SERVER BOOT ═══  ts={_server_start_ts}  boot_id={BOOT_ID}  sos={SOS_CONCURRENCY}"
 )
 
 
 # ── Global Queues ─────────────────────────────────────────────
 _sos_queue: asyncio.Queue = asyncio.Queue()          # (job_id, state, [entity_dicts], api_key)
-_company_queue: asyncio.Queue = asyncio.Queue()       # (job_id, entity_idx, api_key)
-_person_queue: asyncio.Queue = asyncio.Queue()        # (job_id, entity_idx, person_entry, api_key)
 _dispatcher_tasks: list = []
 
 # In-memory job registry
@@ -89,23 +82,11 @@ _jobs: dict[str, dict] = {}
 # ── Lifespan ──────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Pool 1: SOS dispatchers
     for i in range(SOS_CONCURRENCY):
         t = asyncio.create_task(_sos_dispatcher(i + 1))
         _dispatcher_tasks.append(t)
-    # Pool 2: Company enrichment dispatchers
-    for i in range(COMPANY_CONCURRENCY):
-        t = asyncio.create_task(_company_dispatcher(i + 1))
-        _dispatcher_tasks.append(t)
-    # Pool 3: Person search dispatchers (dynamic, capped)
-    for i in range(PERSON_CONCURRENCY_MAX):
-        t = asyncio.create_task(_person_dispatcher(i + 1))
-        _dispatcher_tasks.append(t)
 
-    logger.info(
-        f"Started {SOS_CONCURRENCY} SOS + {COMPANY_CONCURRENCY} company + "
-        f"{PERSON_CONCURRENCY_MAX} person dispatchers"
-    )
+    logger.info(f"Started {SOS_CONCURRENCY} SOS dispatchers")
     yield
     for t in _dispatcher_tasks:
         t.cancel()
@@ -220,16 +201,12 @@ async def _sos_dispatcher(worker_id: int):
             entity_name = entity_dict.get("entity_name", "?")
             people = build_people_list(sos_result)
 
-            entity_idx = len(job["records"])
             rec = EntityRecord(
                 entity_name=entity_name,
                 state=state,
-                num_locations=entity_dict.get("num_locations", 1),
-                all_states=entity_dict.get("all_states", state),
+                original_row_index=entity_dict.get("row_index", 0),
                 address=entity_dict.get("address", ""),
-                original_notes=entity_dict.get("notes", ""),
                 source_file=job.get("filename", ""),
-                franchisor=job.get("franchisor", ""),
                 registered_agent=sos_result.registered_agent,
                 agent_address=sos_result.agent_address,
                 entity_status=sos_result.entity_status,
@@ -242,19 +219,6 @@ async def _sos_dispatcher(worker_id: int):
                 people=people,
             )
             job["records"].append(rec)
-
-            # Queue company + person enrichment — gated by ENRICHMENT_ENABLED.
-            # When the flag is off, we stop at SOS so runs stay focused on
-            # refining SOS scraping without burning enrichment credits.
-            if ENRICHMENT_ENABLED:
-                # Queue company enrichment (uses Browser Use Cloud key, not Gemini)
-                await _company_queue.put((job_id, entity_idx, BROWSER_USE_API_KEY))
-                job["company_total"] += 1
-
-                # Queue person search for each human officer/agent
-                for person in people:
-                    await _person_queue.put((job_id, entity_idx, person, BROWSER_USE_API_KEY))
-                    job["person_total"] += 1
 
             job["sos_completed"] += 1
             _update_progress(job)
@@ -348,9 +312,8 @@ async def _sos_dispatcher(worker_id: int):
                 rec = EntityRecord(
                     entity_name=entity_name,
                     state=state,
-                    num_locations=entity_dict.get("num_locations", 1),
-                    all_states=entity_dict.get("all_states", state),
-                    original_notes=entity_dict.get("notes", ""),
+                    original_row_index=entity_dict.get("row_index", 0),
+                    address=entity_dict.get("address", ""),
                     source_file=job.get("filename", ""),
                     sos_error=str(e),
                 )
@@ -369,232 +332,49 @@ async def _sos_dispatcher(worker_id: int):
 
 
 # ══════════════════════════════════════════════════════════════
-# POOL 2: COMPANY ENRICHMENT DISPATCHERS
-# ══════════════════════════════════════════════════════════════
-
-async def _company_dispatcher(worker_id: int):
-    """Pull from company queue, run web search for company intelligence."""
-    logger.info(f"Company Dispatcher {worker_id} ready")
-
-    while True:
-        try:
-            job_id, entity_idx, api_key = await _company_queue.get()
-        except asyncio.CancelledError:
-            break
-
-        job = _jobs.get(job_id)
-        if not job:
-            _company_queue.task_done()
-            continue
-
-        # Fail-fast: skip work if API key is dead
-        if _fail_job_if_key_dead(job, api_key):
-            job["company_completed"] += 1
-            _company_queue.task_done()
-            _maybe_finalize(job_id)
-            continue
-
-        rec = job["records"][entity_idx]
-        entity_name = rec.entity_name
-        step_id = f"company:{entity_name}"
-
-        ts = time.strftime("%H:%M:%S")
-        job["log"].append(f"[{ts}] COMPANY: {entity_name}")
-        job["current_step"] = f"Company: {entity_name}"
-        _add_step(job, step_id, f"Company Intel — {entity_name}", "company")
-
-        logger.info(f"── COMPANY START  [W{worker_id}] job={job_id[:8]}  entity=\"{entity_name}\"")
-        comp_start = time.time()
-
-        try:
-            result = await company_enrichment(
-                entity_name=entity_name,
-                state=rec.state,
-                franchisor=rec.franchisor,
-                api_key=api_key,
-                user_context=job.get("enrichment_context", ""),
-            )
-            rec.company = result
-            elapsed = round(time.time() - comp_start, 1)
-
-            # Update step with result details
-            if result.error:
-                _update_step(job, step_id, "failed", result.error[:80])
-            else:
-                parts = []
-                if result.website:
-                    parts.append(f"Website found")
-                if result.recent_news_summary:
-                    parts.append(f"News found")
-                if result.key_developments:
-                    parts.append(f"{len(result.key_developments)} development{'s' if len(result.key_developments) != 1 else ''}")
-                _update_step(job, step_id, "success", ", ".join(parts) if parts else "No info found")
-
-            logger.info(
-                f"── COMPANY DONE   [W{worker_id}] job={job_id[:8]}  "
-                f"entity=\"{entity_name}\"  website={'found' if result.website else 'none'}  "
-                f"elapsed={elapsed}s"
-            )
-
-        except Exception as e:
-            elapsed = round(time.time() - comp_start, 1)
-            logger.error(
-                f"── COMPANY FAIL   [W{worker_id}] job={job_id[:8]}  "
-                f"entity=\"{entity_name}\"  elapsed={elapsed}s  error={e}"
-            )
-            rec.company = CompanyResult(entity_name=entity_name, error=str(e)[:500])
-            _update_step(job, step_id, "failed", str(e)[:80])
-
-        finally:
-            job["company_completed"] += 1
-            _company_queue.task_done()
-            _update_progress(job)
-            _maybe_finalize(job_id)
-
-
-# ══════════════════════════════════════════════════════════════
-# POOL 3: PERSON SEARCH DISPATCHERS
-# ══════════════════════════════════════════════════════════════
-
-async def _person_dispatcher(worker_id: int):
-    """Pull from person queue, run web search for personal contact info."""
-    logger.info(f"Person Dispatcher {worker_id} ready")
-
-    while True:
-        try:
-            job_id, entity_idx, person_entry, api_key = await _person_queue.get()
-        except asyncio.CancelledError:
-            break
-
-        job = _jobs.get(job_id)
-        if not job:
-            _person_queue.task_done()
-            continue
-
-        # Fail-fast: skip work if API key is dead
-        if _fail_job_if_key_dead(job, api_key):
-            job["person_completed"] += 1
-            _person_queue.task_done()
-            _maybe_finalize(job_id)
-            continue
-
-        rec = job["records"][entity_idx]
-        person_name = person_entry.name
-        entity_name = rec.entity_name
-        step_id = f"person:{person_name}@{entity_name}"
-
-        ts = time.strftime("%H:%M:%S")
-        job["log"].append(f"[{ts}] PERSON: {person_name} @ {entity_name}")
-        job["current_step"] = f"Person: {person_name} @ {entity_name}"
-        _add_step(job, step_id, f"Person Search — {person_name} @ {entity_name}", "person")
-
-        logger.info(
-            f"── PERSON START  [W{worker_id}] job={job_id[:8]}  "
-            f"person=\"{person_name}\"  entity=\"{entity_name}\""
-        )
-        person_start = time.time()
-
-        try:
-            result = await person_search(
-                person=person_entry,
-                entity_name=entity_name,
-                state=rec.state,
-                api_key=api_key,
-                user_context=job.get("enrichment_context", ""),
-            )
-            rec.person_results.append(result)
-            elapsed = round(time.time() - person_start, 1)
-
-            # Update step with result details
-            if result.error:
-                _update_step(job, step_id, "failed", result.error[:80])
-            else:
-                parts = []
-                if result.linkedin_url:
-                    parts.append("LinkedIn found")
-                if result.linkedin_location:
-                    parts.append(f"Location: {result.linkedin_location[:30]}")
-                if result.email:
-                    parts.append("Email found")
-                if result.personal_phone:
-                    parts.append("Phone found")
-                _update_step(job, step_id, "success", ", ".join(parts) if parts else "No info found")
-
-            logger.info(
-                f"── PERSON DONE   [W{worker_id}] job={job_id[:8]}  "
-                f"person=\"{person_name}\"  linkedin={'found' if result.linkedin_url else 'none'}  "
-                f"elapsed={elapsed}s"
-            )
-
-        except Exception as e:
-            elapsed = round(time.time() - person_start, 1)
-            logger.error(
-                f"── PERSON FAIL   [W{worker_id}] job={job_id[:8]}  "
-                f"person=\"{person_name}\"  elapsed={elapsed}s  error={e}"
-            )
-            rec.person_results.append(PersonResult(
-                entity_name=entity_name,
-                person_name=person_name,
-                title=person_entry.title,
-                sos_address=person_entry.address if person_entry.address != "UNKNOWN" else "",
-                error=str(e)[:500],
-            ))
-            _update_step(job, step_id, "failed", str(e)[:80])
-
-        finally:
-            job["person_completed"] += 1
-            _person_queue.task_done()
-            _update_progress(job)
-            _maybe_finalize(job_id)
-
-
-# ══════════════════════════════════════════════════════════════
 # PROGRESS + FINALIZATION
 # ══════════════════════════════════════════════════════════════
 
 def _update_progress(job: dict):
-    """Recalculate progress_pct across all three phases."""
-    total = job["sos_total"] + job["company_total"] + job["person_total"]
-    done = job["sos_completed"] + job["company_completed"] + job["person_completed"]
+    total = job["sos_total"]
+    done = job["sos_completed"]
     if total > 0:
         job["progress_pct"] = min(95, int(done / total * 100))
 
 
 def _maybe_finalize(job_id: str):
-    """Check if all work is done and trigger XLSX build."""
     job = _jobs.get(job_id)
     if not job or job["status"] != "running":
         return
-    sos_done = job["sos_completed"] >= job["sos_total"]
-    company_done = job["company_completed"] >= job["company_total"]
-    person_done = job["person_completed"] >= job["person_total"]
-    if sos_done and company_done and person_done:
+    if job["sos_completed"] >= job["sos_total"]:
         asyncio.create_task(_finalize_job(job_id))
 
 
 async def _finalize_job(job_id: str):
-    """Build XLSX + audit trail from all collected results and mark job done."""
+    """Append Owner 1..N columns to the original XLSX and mark job done."""
     job = _jobs.get(job_id)
     if not job or job["status"] != "running":
         return
     try:
         job["current_step"] = "Building output spreadsheet…"
         records = job["records"]
+        original_bytes = job.get("input_bytes") or b""
 
-        xlsx_bytes = build_xlsx(records)
+        xlsx_bytes = build_xlsx_with_owners(original_bytes, records)
         out_path = JOBS_DIR / f"{job_id}.xlsx"
         out_path.write_bytes(xlsx_bytes)
 
-        # Write audit trail
         write_audit_trail(records, JOBS_DIR, job_id)
 
         job["status"] = "done"
         job["progress_pct"] = 100
         job["current_step"] = "Complete"
         job["output_path"] = str(out_path)
+        # Drop the cached input bytes so we don't hold them after finalize
+        job["input_bytes"] = None
 
         total_entities = len(records)
-        total_people = sum(len(r.person_results) for r in records)
+        total_people = sum(len(r.people) for r in records)
         job["entity_count"] = total_entities
         job["people_count"] = total_people
 
@@ -603,12 +383,12 @@ async def _finalize_job(job_id: str):
         end_ts = time.strftime("%Y-%m-%d %H:%M:%S")
 
         ts = time.strftime("%H:%M:%S")
-        job["log"].append(f"[{ts}] Complete — {total_entities} entities, {total_people} people")
+        job["log"].append(f"[{ts}] Complete — {total_entities} businesses, {total_people} owners")
 
         logger.info(
             f"\n{'═' * 72}\n"
             f"  ■ RUN COMPLETE  job={job_id[:8]}  ts={end_ts}\n"
-            f"  entities={total_entities}  people={total_people}  elapsed={elapsed_str}\n"
+            f"  businesses={total_entities}  owners={total_people}  elapsed={elapsed_str}\n"
             f"  output={out_path}\n"
             f"{'═' * 72}"
         )
@@ -623,7 +403,7 @@ async def _finalize_job(job_id: str):
 # FASTAPI APP
 # ══════════════════════════════════════════════════════════════
 
-app = FastAPI(title="FDD Lead Enrichment Agent", version="5.0.0", lifespan=lifespan)
+app = FastAPI(title="Business Owner Lookup", version="6.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 _static_dir = Path(__file__).parent / "static"
@@ -642,165 +422,72 @@ async def serve_ui():
 @app.post("/process-fdd")
 async def process_fdd(
     file: UploadFile = File(...),
-    gemini_key_override: str = Form(default=""),
-    browser_use_key_override: str = Form(default=""),
-    context: str = Form(default=""),
 ):
     """
-    Submit a file for processing.
-    Extracts entities from PDF/XLSX, creates a job, and enqueues to the SOS pool.
-
-    `context` is free-text user-provided context about the list (e.g.,
-    "This is a Del Taco FDD list — every entity is a Del Taco franchisee").
-    It is propagated to the company + person enrichment agents so their
-    web searches are better-informed. It is NOT passed to the SOS agents,
-    which rely on rigid per-state portal walkthroughs.
+    Submit a Google Places business-list XLSX. Each row is looked up on the
+    matching state's Secretary of State portal; owner names are extracted and
+    appended to the original sheet as Owner 1..N columns.
     """
-    gemini_key = gemini_key_override or GOOGLE_API_KEY
-    bu_key = browser_use_key_override or BROWSER_USE_API_KEY
-    if not gemini_key:
-        raise HTTPException(400, "GOOGLE_API_KEY is required for PDF extraction and SOS agents")
-    if not bu_key:
-        raise HTTPException(400, "BROWSER_USE_API_KEY is required for company/person agents")
+    if not GOOGLE_API_KEY:
+        raise HTTPException(400, "GOOGLE_API_KEY is required for SOS agents")
 
-    allowed = {".pdf", ".xlsx", ".xls", ".csv"}
     ext = Path(file.filename or "").suffix.lower()
-    if ext not in allowed:
-        raise HTTPException(400, f"Unsupported file type '{ext}'. Allowed: {allowed}")
+    if ext not in {".xlsx", ".xls"}:
+        raise HTTPException(400, f"Unsupported file type '{ext}'. Expected: .xlsx")
 
     file_bytes = await file.read()
     if not file_bytes:
         raise HTTPException(400, "Uploaded file is empty")
 
-    # ── Extract entities (uses Gemini for PDF/XLSX parsing) ──
     try:
-        if ext == ".pdf":
-            entities = await extract_entities_from_pdf(file_bytes, gemini_key)
-        else:
-            entities = await extract_entities_from_xlsx(file_bytes, gemini_key)
-        entities = dedup_entities(entities)
-    except GeminiOverloadedError as e:
-        logger.error(f"Extraction failed — Gemini overloaded: {e}")
-        raise HTTPException(503, str(e))
-    except GeminiRateLimitError as e:
-        logger.error(f"Extraction failed — Gemini rate limited: {e}")
-        raise HTTPException(429, str(e))
-    except APIKeyDeadError as e:
-        logger.error(f"Extraction failed — API key dead: {e}")
-        raise HTTPException(401, str(e))
+        entities = extract_businesses_from_xlsx(file_bytes)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     except Exception as e:
-        raise HTTPException(500, f"Entity extraction failed: {e}")
+        raise HTTPException(500, f"Failed to read XLSX: {e}")
 
     if not entities:
-        raise HTTPException(422, "No franchisee entities found in document")
+        raise HTTPException(422, "No business rows found in spreadsheet")
 
-    # ── Pre-filter: route person-named entities to manual review ──
-    # Entities whose "name" is actually a person's name have ~100% failure
-    # rate on SOS portals and corrupt results when forced through.  Split
-    # the list into (businesses → SOS pipeline) and (persons → manual-
-    # review bucket carried straight to the final XLSX with a flag).
-    entities, person_entities = split_entities_by_type(entities)
-    logger.info(
-        f"Entity classification: {len(entities)} business entities to SOS "
-        f"pipeline, {len(person_entities)} person-named entities routed to "
-        f"manual review"
-    )
-    if person_entities:
-        sample_names = ", ".join(e.get("entity_name", "?") for e in person_entities[:5])
-        logger.info(f"  Manual-review examples: {sample_names}"
-                    + (f" (+{len(person_entities)-5} more)" if len(person_entities) > 5 else ""))
-
-    # ── Create job ──
     job_id = str(uuid.uuid4())
     run_ts = time.strftime("%Y-%m-%d %H:%M:%S")
     _jobs[job_id] = {
         "job_id": job_id,
         "status": "running",
         "filename": file.filename,
-        "franchisor": "",  # could be detected from PDF page 1
-        # User-supplied free-text context, passed to enrichment agents only.
-        # SOS agents deliberately do NOT see this — they use the rigid
-        # per-state portal walkthroughs, not free-text hints.
-        "enrichment_context": (context or "").strip(),
+        # Original XLSX bytes — re-opened at finalize time so owner columns
+        # are appended onto the user's exact sheet (formatting preserved).
+        "input_bytes": file_bytes,
         "created_at": time.time(),
-        "current_step": f"Queued — {len(entities)} entities",
+        "current_step": f"Queued — {len(entities)} businesses",
         "progress_pct": 0,
-        # SOS phase
         "sos_total": len(entities),
         "sos_completed": 0,
-        # Company enrichment phase
-        "company_total": 0,
-        "company_completed": 0,
-        # Person search phase
-        "person_total": 0,
-        "person_completed": 0,
-        # Results
-        "records": [],  # list[EntityRecord] — includes MANUAL_REVIEW rows
+        "records": [],
         "log": [],
-        "steps": [],   # structured step tracker: [{id, label, phase, status, detail, ts}]
+        "steps": [],
         "output_path": None,
         "entity_count": 0,
         "people_count": 0,
         "error": "",
     }
 
-    ctx_line = ""
-    if (context or "").strip():
-        preview = (context or "").strip()
-        if len(preview) > 120:
-            preview = preview[:117] + "..."
-        ctx_line = f"\n  context=\"{preview}\""
     logger.info(
         f"\n{'═' * 72}\n"
         f"  ▶ RUN START  job={job_id[:8]}  ts={run_ts}\n"
-        f"  file={file.filename}  entities={len(entities)} (SOS) + "
-        f"{len(person_entities)} (manual review)  "
-        f"pools=SOS:{SOS_CONCURRENCY}/CO:{COMPANY_CONCURRENCY}/P:{PERSON_CONCURRENCY_MAX}"
-        f"{ctx_line}\n"
+        f"  file={file.filename}  businesses={len(entities)}  pool=SOS:{SOS_CONCURRENCY}\n"
         f"{'═' * 72}"
     )
 
-    # ── Seed manual-review records now — they bypass SOS entirely ──
-    # Person-named rows (no LLC/Inc/Corp/LP/Group/etc. suffix) are appended
-    # directly to job['records'] with a MANUAL_REVIEW flag. They appear on
-    # the Company Leads sheet alongside SOS-processed rows but are visually
-    # distinguished by an amber fill and the MANUAL_REVIEW confidence, so
-    # the downstream manual-search step can filter on them.
-    for e in person_entities:
-        rec = EntityRecord(
-            entity_name=e.get("entity_name", "?"),
-            state=e.get("state", ""),
-            num_locations=e.get("num_locations", 1),
-            all_states=e.get("all_states", e.get("state", "")),
-            address=e.get("address", ""),
-            original_notes=e.get("notes", ""),
-            source_file=file.filename or "",
-            franchisor="",
-            registered_agent="N/A",
-            agent_address="N/A",
-            entity_status="N/A",
-            formation_date="N/A",
-            entity_type="N/A",
-            dba_name="N/A",
-            sos_source_url="",
-            sos_confidence="MANUAL_REVIEW",
-            sos_error="Name has no business suffix (LLC/Inc/Corp/LP/Group/etc.); held for a separate manual web-search step.",
-            people=[],
-        )
-        _jobs[job_id]["records"].append(rec)
-    # These rows don't go through SOS, so don't count them in sos_total.
-    # They're already in records[] and will flow through to the final XLSX
-    # on the Company Leads sheet with the MANUAL_REVIEW flag.
-
-    # ── Group entities by state, enqueue as batches ──
+    # Group by state, enqueue one batch per state
     from collections import defaultdict
     state_batches = defaultdict(list)
     for entity in entities:
-        st = (entity.get("state") or "").strip().upper().split(",")[0].strip()
+        st = (entity.get("state") or "").strip().upper()
         state_batches[st or "UNKNOWN"].append(entity)
 
     for st, batch in state_batches.items():
-        await _sos_queue.put((job_id, st, batch, gemini_key))
+        await _sos_queue.put((job_id, st, batch, GOOGLE_API_KEY))
 
     logger.info(
         f"  Queued {len(state_batches)} state batches: "
@@ -824,10 +511,6 @@ async def get_job(job_id: str):
         "progress_pct": job["progress_pct"],
         "sos_total": job["sos_total"],
         "sos_completed": job["sos_completed"],
-        "company_total": job["company_total"],
-        "company_completed": job["company_completed"],
-        "person_total": job["person_total"],
-        "person_completed": job["person_completed"],
         "total": job["sos_total"],
         "completed": job["sos_completed"],
         "log": job["log"],
@@ -871,13 +554,7 @@ async def health():
         "status": "ok",
         "boot_id": BOOT_ID,
         "gemini_key_set": bool(GOOGLE_API_KEY),
-        "browser_use_key_set": bool(BROWSER_USE_API_KEY),
-        "pools": {
-            "sos": SOS_CONCURRENCY,
-            "company": COMPANY_CONCURRENCY,
-            "person_max": PERSON_CONCURRENCY_MAX,
-            "browser_cap": GLOBAL_BROWSER_CAP,
-        },
+        "pools": {"sos": SOS_CONCURRENCY, "browser_cap": GLOBAL_BROWSER_CAP},
     }
 
 
@@ -886,10 +563,10 @@ if __name__ == "__main__":
     import threading
     import webbrowser
 
-    parser = argparse.ArgumentParser(description="FDD Lead Enrichment Agent")
+    parser = argparse.ArgumentParser(description="Business Owner Lookup")
     parser.add_argument("--port", type=int, default=int(os.getenv("PORT", "8000")))
     args = parser.parse_args()
 
-    logger.info(f"Gemini: {'set' if GOOGLE_API_KEY else 'NOT SET'}  BrowserUse: {'set' if BROWSER_USE_API_KEY else 'NOT SET'}")
+    logger.info(f"Gemini: {'set' if GOOGLE_API_KEY else 'NOT SET'}")
     threading.Timer(1.5, lambda: webbrowser.open(f"http://localhost:{args.port}")).start()
     uvicorn.run("server:app", host="0.0.0.0", port=args.port, reload=False)

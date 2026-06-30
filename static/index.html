@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>FDD Lead Enrichment Agent</title>
+<title>Business Owner Lookup</title>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -304,8 +304,8 @@
 
 <header>
   <div class="header-left">
-    <h1>FDD Lead Enrichment Agent</h1>
-    <p>SOS Lookup &rarr; Company Intel &rarr; Person Search &rarr; Lead Sheet</p>
+    <h1>Business Owner Lookup</h1>
+    <p>Google Places list &rarr; SOS Lookup &rarr; Owner Names appended</p>
   </div>
   <div class="logo-wrap">
     <img src="/static/logo.png" alt="Alliance Human Capital Management" class="logo">
@@ -324,16 +324,12 @@
     <div id="drop-zone" onclick="document.getElementById('file-input').click()">
       <div class="icon">&#128196;</div>
       <p><strong>Click to browse</strong> or drag &amp; drop here</p>
-      <p style="margin-top:4px">Supports: .pdf, .xlsx, .xls, .csv</p>
+      <p style="margin-top:4px">Supports: .xlsx (Google Places business-list export)</p>
     </div>
-    <input type="file" id="file-input" accept=".pdf,.xlsx,.xls,.csv">
+    <input type="file" id="file-input" accept=".xlsx,.xls">
     <div id="file-name"></div>
 
-    <label class="ctx-label" for="context-input">Enrichment Context (optional)</label>
-    <p class="ctx-help">Free-text context about this list — passed to company &amp; person enrichment agents (not SOS). e.g. "This is a Del Taco FDD list; treat every entity as a franchisee of Del Taco LLC."</p>
-    <textarea id="context-input" placeholder="Describe the list so enrichment agents search with the right assumptions…"></textarea>
-
-    <button class="run-btn" id="run-btn" disabled onclick="startJob()">Run Pipeline</button>
+    <button class="run-btn" id="run-btn" disabled onclick="startJob()">Run Lookup</button>
   </div>
 
   <div class="jobs-header">
@@ -343,12 +339,12 @@
   <div id="jobs-list">
     <div class="empty-state" id="empty-state">
       <div class="empty-icon">&#128237;</div>
-      <p>No jobs yet — upload an FDD or lead list to get started</p>
+      <p>No jobs yet — upload a business list to get started</p>
     </div>
   </div>
 </main>
 
-<footer>Alliance Human Capital Management &mdash; FDD Lead Enrichment Agent v5</footer>
+<footer>Alliance Human Capital Management &mdash; Business Owner Lookup v6</footer>
 
 <script>
 const STORAGE_KEY = 'fdd_jobs';
@@ -384,14 +380,11 @@ async function startJob() {
   btn.disabled = true; btn.classList.add('parsing');
   btn.innerHTML = '<span class="spinner"></span>Parsing Data\u2026';
   document.getElementById('file-name').textContent = '';
-  document.getElementById('context-input').value = '';
 
   const fd = new FormData();
   fd.append('file', selectedFile);
-  const ctx = document.getElementById('context-input').value.trim();
-  if (ctx) fd.append('context', ctx);
 
-  const resetBtn = () => { btn.disabled = true; btn.classList.remove('parsing'); btn.innerHTML = 'Run Pipeline'; };
+  const resetBtn = () => { btn.disabled = true; btn.classList.remove('parsing'); btn.innerHTML = 'Run Lookup'; };
 
   let data;
   try {

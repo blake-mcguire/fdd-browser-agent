@@ -7,11 +7,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── Browser Use Cloud (company + person agents) ─────────────
-BROWSER_USE_API_KEY = os.getenv("BROWSER_USE_API_KEY", "")
-BROWSER_USE_MODEL = os.getenv("BROWSER_USE_MODEL", "browser-use-2.0")
-
-# ── Google Gemini (SOS browser agent + PDF extraction) ───────
+# ── Google Gemini (SOS browser agent) ────────────────────────
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
@@ -25,21 +21,12 @@ MI_SOS_PASS = os.getenv("MI_SOS_PASS", "")
 # ── Browser ──────────────────────────────────────────────────
 BROWSER_HEADLESS = os.getenv("BROWSER_HEADLESS", "false").lower() in ("true", "1", "yes")
 
-# ── Pipeline toggles ──────────────────────────────────────────
-# Temporarily sever company & person enrichment while tuning SOS.
-# Set to "true" to re-enable downstream enrichment.
-ENRICHMENT_ENABLED = os.getenv("ENRICHMENT_ENABLED", "false").lower() in ("true", "1", "yes")
-
 # ── Concurrency ───────────────────────────────────────────────
 SOS_CONCURRENCY = int(os.getenv("SOS_CONCURRENCY", "3"))
-COMPANY_CONCURRENCY = int(os.getenv("COMPANY_CONCURRENCY", "5"))
-PERSON_CONCURRENCY_MAX = int(os.getenv("PERSON_CONCURRENCY_MAX", "10"))
 GLOBAL_BROWSER_CAP = int(os.getenv("GLOBAL_BROWSER_CAP", "20"))
 
 # ── Timeouts ──────────────────────────────────────────────────
 SOS_TIMEOUT = int(os.getenv("SOS_TIMEOUT", "300"))
-COMPANY_TIMEOUT = int(os.getenv("COMPANY_TIMEOUT", "180"))
-PERSON_TIMEOUT = int(os.getenv("PERSON_TIMEOUT", "180"))
 
 # ── Agent step limits ─────────────────────────────────────────
 SOS_MAX_STEPS = int(os.getenv("SOS_MAX_STEPS", "15"))
@@ -78,11 +65,6 @@ SOS_SUCCESS_CRITERIA = {
     # HI / MA — officers usually exposed, agent required
     # (use default)
 }
-COMPANY_MAX_STEPS = int(os.getenv("COMPANY_MAX_STEPS", "10"))
-PERSON_MAX_STEPS = int(os.getenv("PERSON_MAX_STEPS", "12"))
-
-# ── Output ────────────────────────────────────────────────────
-MAX_CONTACTS = int(os.getenv("MAX_CONTACTS", "8"))
 
 # ── SOS URL Registry ─────────────────────────────────────────
 SOS_REGISTRY = {
