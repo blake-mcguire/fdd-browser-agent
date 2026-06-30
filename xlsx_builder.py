@@ -1,13 +1,10 @@
 """
 Output writer: takes the original input XLSX bytes and appends owner-name
-columns (Owner 1, Owner 2, ...) to the right of the existing data. Also writes
-a JSONL audit trail with the full SOS payload for debugging.
+columns (Owner 1, Owner 2, ...) to the right of the existing data.
 """
 
 import io
-import json
 import logging
-from pathlib import Path
 
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
@@ -57,12 +54,3 @@ def build_xlsx_with_owners(original_bytes: bytes, records: list[EntityRecord]) -
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
-
-
-def write_audit_trail(records: list[EntityRecord], output_dir: Path, job_id: str):
-    audit_path = output_dir / f"{job_id}_audit.jsonl"
-    with open(audit_path, "w") as f:
-        for rec in records:
-            f.write(json.dumps(rec.model_dump(mode="json")) + "\n")
-    logger.info(f"Audit trail written: {audit_path}")
-    return audit_path

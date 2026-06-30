@@ -418,7 +418,7 @@ async function startJob() {
 }
 
 async function pollAll() {
-  const active = Object.values(jobs).filter(j => j.status === 'running' || j.status === 'queued');
+  const active = Object.values(jobs).filter(j => j.status === 'running' || j.status === 'queued' || j.status === 'interrupted');
   for (const j of active) {
     try {
       const resp = await fetch(`/job/${j.id}`);
@@ -570,6 +570,10 @@ function cardHTML(j) {
     const p = j.peopleCount != null ? ` &middot; <span>${j.peopleCount}</span> people` : '';
     bottom = `<div class="job-stats">${e}${p}</div>
               <button class="dl-btn" onclick="dl('${j.id}')">&#8595; Download XLSX</button>`;
+  } else if ((j.status === 'running' || j.status === 'interrupted') && (j.sosCompleted || 0) > 0) {
+    const label = j.status === 'interrupted' ? 'Download Recovered XLSX' : 'Download Partial XLSX';
+    bottom = `<div class="job-stats"><span>${j.sosCompleted}</span> of ${j.sosTotal || '?'} so far</div>
+              <button class="dl-btn" onclick="dl('${j.id}')">&#8595; ${label}</button>`;
   } else if (j.status === 'failed') {
     const errMsg = j.error || 'Unknown error';
     const isOverload = errMsg.includes('high demand') || errMsg.includes('overload');

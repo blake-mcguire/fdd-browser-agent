@@ -9,6 +9,7 @@ this pipeline only resolves business name + state to owner names.
 """
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -19,7 +20,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 
@@ -31,7 +32,7 @@ from config import (
 from models import EntityRecord
 from extraction import extract_businesses_from_xlsx
 from sos_agent import sos_lookup_batch, build_people_list
-from xlsx_builder import build_xlsx_with_owners, write_audit_trail
+from xlsx_builder import build_xlsx_with_owners
 from llm import is_key_dead, APIKeyDeadError, GeminiOverloadedError, GeminiRateLimitError
 
 
@@ -78,10 +79,119 @@ _dispatcher_tasks: list = []
 # In-memory job registry
 _jobs: dict[str, dict] = {}
 
+# Per-job append lock so concurrent SOS workers don't interleave jsonl writes
+_results_locks: dict[str, asyncio.Lock] = {}
+
+
+# ── Durable job state ────────────────────────────────────────
+# Layout per job in JOBS_DIR:
+#   {job_id}.input.xlsx     — original upload (kept so partial output can be
+#                             rebuilt on demand at any time)
+#   {job_id}.meta.json      — {filename, sos_total, created_at}
+#   {job_id}.results.jsonl  — one EntityRecord per line, fsync'd on append
+#   {job_id}.xlsx           — final output (written at clean finalize)
+#
+# Any time the process exits abruptly, the input + jsonl survive and the
+# download endpoint rebuilds the partial XLSX from whatever lines exist.
+
+def _input_path(job_id: str) -> Path: return JOBS_DIR / f"{job_id}.input.xlsx"
+def _meta_path(job_id: str)  -> Path: return JOBS_DIR / f"{job_id}.meta.json"
+def _results_path(job_id: str) -> Path: return JOBS_DIR / f"{job_id}.results.jsonl"
+def _output_path(job_id: str) -> Path: return JOBS_DIR / f"{job_id}.xlsx"
+
+
+def _persist_input(job_id: str, data: bytes) -> Path:
+    p = _input_path(job_id)
+    p.write_bytes(data)
+    return p
+
+
+def _persist_meta(job_id: str, meta: dict):
+    _meta_path(job_id).write_text(json.dumps(meta))
+
+
+def _load_meta(job_id: str) -> dict:
+    p = _meta_path(job_id)
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text())
+    except Exception:
+        return {}
+
+
+async def _append_record(job_id: str, rec: EntityRecord):
+    """Append one record line to results.jsonl with fsync. Lock per job."""
+    lock = _results_locks.setdefault(job_id, asyncio.Lock())
+    line = rec.model_dump_json() + "\n"
+    async with lock:
+        with open(_results_path(job_id), "a") as f:
+            f.write(line)
+            f.flush()
+            os.fsync(f.fileno())
+
+
+def _load_results(job_id: str) -> list[EntityRecord]:
+    p = _results_path(job_id)
+    if not p.exists():
+        return []
+    out = []
+    for line in p.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(EntityRecord.model_validate_json(line))
+        except Exception as e:
+            logger.warning(f"Skipping malformed results line in {p.name}: {e}")
+    return out
+
+
+def _scan_existing_jobs():
+    """At boot, rebuild _jobs entries from disk for any prior runs."""
+    for input_path in JOBS_DIR.glob("*.input.xlsx"):
+        job_id = input_path.name.removesuffix(".input.xlsx")
+        if job_id in _jobs:
+            continue
+        meta = _load_meta(job_id)
+        records = _load_results(job_id)
+        final_exists = _output_path(job_id).exists()
+        if final_exists:
+            status, step = "done", "Complete"
+        elif records:
+            status, step = "interrupted", "Recovered after restart — partial results available"
+        else:
+            status, step = "interrupted", "Recovered after restart — no results captured"
+
+        _jobs[job_id] = {
+            "job_id": job_id,
+            "status": status,
+            "filename": meta.get("filename", ""),
+            "input_path": str(input_path),
+            "created_at": meta.get("created_at", input_path.stat().st_mtime),
+            "current_step": step,
+            "progress_pct": 100 if status == "done" else 0,
+            "sos_total": meta.get("sos_total", len(records)),
+            "sos_completed": len(records),
+            "records": records,
+            "log": [],
+            "steps": [],
+            "output_path": str(_output_path(job_id)) if final_exists else None,
+            "entity_count": len(records),
+            "people_count": sum(len(r.people) for r in records),
+            "error": "",
+        }
+        logger.info(
+            f"Recovered job {job_id[:8]}  status={status}  "
+            f"records={len(records)}/{meta.get('sos_total', '?')}"
+        )
+
 
 # ── Lifespan ──────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _scan_existing_jobs()
+
     for i in range(SOS_CONCURRENCY):
         t = asyncio.create_task(_sos_dispatcher(i + 1))
         _dispatcher_tasks.append(t)
@@ -219,6 +329,7 @@ async def _sos_dispatcher(worker_id: int):
                 people=people,
             )
             job["records"].append(rec)
+            await _append_record(job_id, rec)
 
             job["sos_completed"] += 1
             _update_progress(job)
@@ -318,6 +429,7 @@ async def _sos_dispatcher(worker_id: int):
                     sos_error=str(e),
                 )
                 job["records"].append(rec)
+                await _append_record(job_id, rec)
                 job["sos_completed"] += 1
 
         finally:
@@ -358,20 +470,17 @@ async def _finalize_job(job_id: str):
     try:
         job["current_step"] = "Building output spreadsheet…"
         records = job["records"]
-        original_bytes = job.get("input_bytes") or b""
+        input_path = Path(job.get("input_path") or "")
+        original_bytes = input_path.read_bytes() if input_path.exists() else b""
 
         xlsx_bytes = build_xlsx_with_owners(original_bytes, records)
-        out_path = JOBS_DIR / f"{job_id}.xlsx"
+        out_path = _output_path(job_id)
         out_path.write_bytes(xlsx_bytes)
-
-        write_audit_trail(records, JOBS_DIR, job_id)
 
         job["status"] = "done"
         job["progress_pct"] = 100
         job["current_step"] = "Complete"
         job["output_path"] = str(out_path)
-        # Drop the cached input bytes so we don't hold them after finalize
-        job["input_bytes"] = None
 
         total_entities = len(records)
         total_people = sum(len(r.people) for r in records)
@@ -451,14 +560,23 @@ async def process_fdd(
 
     job_id = str(uuid.uuid4())
     run_ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    created_at = time.time()
+
+    # Persist input + meta sidecar so this job survives process restarts and
+    # the download endpoint can rebuild a partial XLSX at any time.
+    input_path = _persist_input(job_id, file_bytes)
+    _persist_meta(job_id, {
+        "filename": file.filename or "",
+        "sos_total": len(entities),
+        "created_at": created_at,
+    })
+
     _jobs[job_id] = {
         "job_id": job_id,
         "status": "running",
         "filename": file.filename,
-        # Original XLSX bytes — re-opened at finalize time so owner columns
-        # are appended onto the user's exact sheet (formatting preserved).
-        "input_bytes": file_bytes,
-        "created_at": time.time(),
+        "input_path": str(input_path),
+        "created_at": created_at,
         "current_step": f"Queued — {len(entities)} businesses",
         "progress_pct": 0,
         "sos_total": len(entities),
@@ -523,19 +641,31 @@ async def get_job(job_id: str):
 
 @app.get("/job/{job_id}/download")
 async def download_job(job_id: str):
+    """
+    Build and return the XLSX from whatever records exist for this job —
+    works while running, after clean finalize, or after a crash-recover.
+    """
     job = _jobs.get(job_id)
     if not job:
         raise HTTPException(404, f"Job {job_id} not found")
-    if job["status"] != "done":
-        raise HTTPException(400, f"Job not done yet (status: {job['status']})")
-    out_path = job.get("output_path")
-    if not out_path or not Path(out_path).exists():
-        raise HTTPException(500, "Output file not found on disk")
-    stem = Path(job["filename"]).stem
-    return FileResponse(
-        path=out_path,
+
+    records = job.get("records") or []
+    if not records:
+        raise HTTPException(409, f"No results captured yet (status: {job['status']})")
+
+    input_path = Path(job.get("input_path") or "")
+    if not input_path.exists():
+        raise HTTPException(500, "Original input file not found on disk")
+
+    original_bytes = input_path.read_bytes()
+    xlsx_bytes = build_xlsx_with_owners(original_bytes, records)
+
+    stem = Path(job.get("filename") or job_id[:8]).stem or job_id[:8]
+    suffix = "_results" if job["status"] == "done" else "_partial"
+    return Response(
+        content=xlsx_bytes,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        filename=f"{stem}_results.xlsx",
+        headers={"Content-Disposition": f'attachment; filename="{stem}{suffix}.xlsx"'},
     )
 
 
